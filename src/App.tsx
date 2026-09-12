@@ -7,6 +7,9 @@ import { Piece, EdgeConfig, Group3D } from './types';
 import ThreeViewer, { MATERIAL_MAP } from './components/ThreeViewer';
 import CutPlanViewer from './components/CutPlanViewer';
 import ThreeViewerOverlay from './components/ThreeViewerOverlay';
+import { createStarterProject, isProjectState, serializePiecesCsv } from './lib/project';
+
+const PROJECT_STORAGE_KEY = 'iamueble-project-v1';
 
 const getMaterialEmoji = (name: string) => {
   const lowercase = name.toLowerCase();
@@ -103,7 +106,17 @@ function useAppHistory(initialState: AppState) {
 type DeleteTarget = { type: 'all' } | { type: 'selected' } | { type: 'group', id: string, name: string } | { type: 'piece', id: string, name: string };
 
 export default function App() {
-  const [appState, setAppState, undo, redo, canUndo, canRedo] = useAppHistory({ pieces: [], groups: [] });
+  const initialStateRef = useRef<AppState | null>(null);
+  if (!initialStateRef.current) {
+    try {
+      const savedProject = window.localStorage.getItem(PROJECT_STORAGE_KEY);
+      const parsedProject = savedProject ? JSON.parse(savedProject) : null;
+      initialStateRef.current = isProjectState(parsedProject) ? parsedProject : createStarterProject();
+    } catch {
+      initialStateRef.current = createStarterProject();
+    }
+  }
+  const [appState, setAppState, undo, redo, canUndo, canRedo] = useAppHistory(initialStateRef.current);
   const { pieces, groups } = appState;
 
   const [deleteConfirm, setDeleteConfirm] = useState<DeleteTarget | null>(null);
@@ -207,6 +220,10 @@ export default function App() {
   });
   
   const [interactMode, setInteractMode] = useState(false);
+
+  useEffect(() => {
+    window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(appState));
+  }, [appState]);
 
   const toggleTray = (key: keyof typeof trayOpen) => {
     setTrayOpen(prev => ({ ...prev, [key]: !prev[key] }));
@@ -543,6 +560,22 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const handleExportCsv = () => {
+    const blob = new Blob([`\uFEFF${serializePiecesCsv(pieces)}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `despiece_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleLoadStarterProject = () => {
+    setAppState(createStarterProject());
+    setSelectedPieceIds([]);
+    setViewMode('3d');
+  };
+
   const handleLoadModel = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -681,6 +714,13 @@ export default function App() {
             >
               <Save className="w-3.5 h-3.5" /> Guardar
             </button>
+            <button
+              className="flex items-center gap-1.5 px-2 py-1 hover:bg-[#333] rounded text-[10px]"
+              onClick={handleLoadStarterProject}
+              title="Cargar un módulo de 800 mm listo para editar"
+            >
+              <Box className="w-3.5 h-3.5" /> Módulo base
+            </button>
           </div>
         </div>
 
@@ -716,9 +756,11 @@ export default function App() {
           <button 
             type="button"
             className="bg-[#306040] hover:bg-[#3c7850] text-[#cfcfcf] text-[10px] px-3 py-0.5 rounded font-bold transition-colors border border-[#1a1a1a] flex items-center gap-1"
-            onClick={() => alert('Exportando...')}
+            onClick={handleExportCsv}
+            disabled={pieces.length === 0}
+            title="Descargar despiece en CSV compatible con Excel"
           >
-            <Download className="w-3 h-3" /> Exportar
+            <Download className="w-3 h-3" /> Exportar CSV
           </button>
         </div>
       </header>
@@ -737,6 +779,7 @@ export default function App() {
            <ToolbarIcon icon={<Menu />} active={false} onClick={() => setMobileMenuOpen(!mobileMenuOpen)} />
            <div className="w-6 h-px bg-[#404040] my-1" />
            <ToolbarIcon icon={<Plus />} active={false} onClick={addPiece} />
+           <ToolbarIcon icon={<Box />} active={false} onClick={handleLoadStarterProject} />
            <ToolbarIcon icon={<Trash2 />} active={false} onClick={() => pieces.length > 0 && setDeleteConfirm({ type: 'all' })} />
            <div className="w-6 h-px bg-[#404040] my-1" />
            <ToolbarIcon icon={<Upload />} active={false} onClick={() => fileInputRef.current?.click()} />
@@ -2595,4 +2638,3 @@ function PropertyField({ label, value, onChange, axis }: { label: string, value:
     </div>
   );
 }
-
