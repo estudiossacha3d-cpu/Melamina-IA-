@@ -47,3 +47,25 @@ test('CSV contains production dimensions and semicolon-separated columns', () =>
   assert.match(csv, /Lateral izquierdo;1;720;560;18/);
   assert.equal(csv.split('\n').length, project.pieces.length + 1);
 });
+
+test('grain direction prevents rotation and reports pieces that do not fit', () => {
+  const [base] = createStarterProject().pieces;
+  const grainPiece = { ...base, largo: 800, ancho: 500, cantidad: 1, veta: true };
+  const config = { width: 600, height: 1000, kerf: 3, margin: 0 };
+
+  const locked = professionalPack([grainPiece], config);
+  assert.equal(locked.boards.length, 0);
+  assert.equal(locked.unplaced.length, 1);
+
+  const rotatable = professionalPack([{ ...grainPiece, veta: false }], config);
+  assert.equal(rotatable.unplaced.length, 0);
+  assert.equal(rotatable.boards[0].rects[0].rotated, true);
+});
+
+test('kerf is reserved between adjacent pieces', () => {
+  const [base] = createStarterProject().pieces;
+  const pair = [{ ...base, largo: 500, ancho: 500, cantidad: 2, veta: false }];
+
+  assert.equal(professionalPack(pair, { width: 1002, height: 500, kerf: 3, margin: 0 }).boards.length, 2);
+  assert.equal(professionalPack(pair, { width: 1003, height: 500, kerf: 3, margin: 0 }).boards.length, 1);
+});

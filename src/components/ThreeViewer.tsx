@@ -1,5 +1,5 @@
 import React, { useRef, useState, useMemo, useEffect } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, TransformControls, Edges, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { Piece } from '../types';
@@ -88,6 +88,71 @@ const getGlobalHalfSizes = (
     Math.round(halfZ * 100000) / 100000
   );
 };
+
+type CameraView = 'iso' | 'front' | 'top' | 'right' | 'fit';
+
+const getModelFrame = (pieces: Piece[]) => {
+  if (pieces.length === 0) {
+    return { center: new THREE.Vector3(0, 0.35, 0), size: 1.2 };
+  }
+
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  pieces.forEach(piece => {
+    const center = new THREE.Vector3(...piece.position3D).multiplyScalar(0.001);
+    const half = getGlobalHalfSizes(piece.rotation3D, piece.largo, piece.espesor, piece.ancho);
+    min.min(center.clone().sub(half));
+    max.max(center.clone().add(half));
+  });
+
+  const center = min.clone().add(max).multiplyScalar(0.5);
+  const size = Math.max(max.x - min.x, max.y - min.y, max.z - min.z, 0.4);
+  return { center, size };
+};
+
+function SceneNavigation({ pieces }: { pieces: Piece[] }) {
+  const { camera } = useThree();
+  const controlsRef = useRef<any>(null);
+  const previousCountRef = useRef(0);
+
+  const applyView = React.useCallback((view: CameraView) => {
+    const { center, size } = getModelFrame(pieces);
+    const distance = Math.max(size * 2.35, 1.15);
+    const direction = view === 'front'
+      ? new THREE.Vector3(0, 0.08, 1)
+      : view === 'top'
+        ? new THREE.Vector3(0, 1, 0.001)
+        : view === 'right'
+          ? new THREE.Vector3(1, 0.08, 0)
+          : new THREE.Vector3(1, 0.82, 1);
+
+    camera.position.copy(center.clone().add(direction.normalize().multiplyScalar(distance)));
+    camera.near = Math.max(0.005, distance / 500);
+    camera.far = Math.max(100, distance * 100);
+    camera.lookAt(center);
+    camera.updateProjectionMatrix();
+    if (controlsRef.current) {
+      controlsRef.current.target.copy(center);
+      controlsRef.current.update();
+    }
+  }, [camera, pieces]);
+
+  useEffect(() => {
+    const handleView = (event: Event) => {
+      const requested = (event as CustomEvent<CameraView>).detail;
+      applyView(requested === 'fit' ? 'iso' : requested);
+    };
+    window.addEventListener('cad-camera-view', handleView);
+    return () => window.removeEventListener('cad-camera-view', handleView);
+  }, [applyView]);
+
+  useEffect(() => {
+    if (previousCountRef.current === 0 && pieces.length > 0) applyView('iso');
+    previousCountRef.current = pieces.length;
+  }, [pieces.length, applyView]);
+
+  return <OrbitControls ref={controlsRef} makeDefault enableDamping dampingFactor={0.08} minDistance={0.15} maxDistance={50} />;
+}
 
 
 const MelaminePiece = ({
@@ -774,14 +839,14 @@ const MelaminePiece = ({
                     onToggleDynamicPiece(piece.id);
                   }
                 }}
-                className={`px-2 py-0.5 rounded-full backdrop-blur-md shadow-lg border text-[10px] font-black flex items-center gap-1.5 transition-all cursor-pointer pointer-events-auto select-none hover:scale-110 active:scale-95 ${
+                className={`px-2 py-0.5 rounded-full backdrop-blur-md shadow-lg border text-[12px] font-black flex items-center gap-1.5 transition-all cursor-pointer pointer-events-auto select-none hover:scale-110 active:scale-95 ${
                   piece.dynamic.isOpen 
                     ? 'bg-purple-900/90 border-purple-400 text-purple-200' 
                     : 'bg-[#18181b]/90 border-purple-500/50 text-purple-300 hover:border-purple-400'
                 }`}
-                title="Componente Dinámico SketchUp - Click para Abrir/Cerrar"
+                title="Haz clic para abrir o cerrar"
               >
-                <span className="text-[11px]">{piece.dynamic.type === 'door' ? '🚪' : '🗄️'}</span>
+                <span className="text-[13px]">{piece.dynamic.type === 'door' ? '🚪' : '🗄️'}</span>
                 <span>{piece.dynamic.type === 'door' ? (piece.dynamic.isOpen ? 'Puerta Abierta' : 'Puerta Cerrada') : (piece.dynamic.isOpen ? 'Cajón Abierto' : 'Cajón Cerrado')}</span>
               </button>
             </Html>
@@ -802,13 +867,13 @@ const MelaminePiece = ({
                       onDoubleClickPiece(piece.id);
                     }
                   }}
-                  className="bg-[#121212]/95 border-2 border-red-500 hover:border-red-400 hover:bg-red-950/60 px-2 py-0.5 rounded-lg shadow-[0_4px_15px_rgba(0,0,0,0.8)] flex items-center gap-1 text-[11px] font-mono font-bold text-white whitespace-nowrap select-none pointer-events-auto cursor-pointer hover:scale-110 active:scale-95 transition-all duration-150 group"
+                  className="bg-[#121212]/95 border-2 border-red-500 hover:border-red-400 hover:bg-red-950/60 px-2 py-0.5 rounded-lg shadow-[0_4px_15px_rgba(0,0,0,0.8)] flex items-center gap-1 text-[13px] font-mono font-bold text-white whitespace-nowrap select-none pointer-events-auto cursor-pointer hover:scale-110 active:scale-95 transition-all duration-150 group"
                   title="Editar Largo (X)"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                  <span className="text-gray-400 text-[9px] font-sans">L:</span>
+                  <span className="text-gray-400 text-[12px] font-sans">L:</span>
                   <span className="text-red-400 text-xs font-black group-hover:underline">{currentDims.largo}</span>
-                  <span className="text-[9px] text-gray-400 font-sans">mm</span>
+                  <span className="text-[12px] text-gray-400 font-sans">mm</span>
                 </button>
               </Html>
 
@@ -824,13 +889,13 @@ const MelaminePiece = ({
                       onDoubleClickPiece(piece.id);
                     }
                   }}
-                  className="bg-[#121212]/95 border-2 border-blue-500 hover:border-blue-400 hover:bg-blue-950/60 px-2 py-0.5 rounded-lg shadow-[0_4px_15px_rgba(0,0,0,0.8)] flex items-center gap-1 text-[11px] font-mono font-bold text-white whitespace-nowrap select-none pointer-events-auto cursor-pointer hover:scale-110 active:scale-95 transition-all duration-150 group"
+                  className="bg-[#121212]/95 border-2 border-blue-500 hover:border-blue-400 hover:bg-blue-950/60 px-2 py-0.5 rounded-lg shadow-[0_4px_15px_rgba(0,0,0,0.8)] flex items-center gap-1 text-[13px] font-mono font-bold text-white whitespace-nowrap select-none pointer-events-auto cursor-pointer hover:scale-110 active:scale-95 transition-all duration-150 group"
                   title="Editar Ancho (Z)"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
-                  <span className="text-gray-400 text-[9px] font-sans">A:</span>
+                  <span className="text-gray-400 text-[12px] font-sans">A:</span>
                   <span className="text-blue-400 text-xs font-black group-hover:underline">{currentDims.ancho}</span>
-                  <span className="text-[9px] text-gray-400 font-sans">mm</span>
+                  <span className="text-[12px] text-gray-400 font-sans">mm</span>
                 </button>
               </Html>
 
@@ -846,13 +911,13 @@ const MelaminePiece = ({
                       onDoubleClickPiece(piece.id);
                     }
                   }}
-                  className="bg-[#121212]/95 border-2 border-green-500 hover:border-green-400 hover:bg-green-950/60 px-2 py-0.5 rounded-lg shadow-[0_4px_15px_rgba(0,0,0,0.8)] flex items-center gap-1 text-[11px] font-mono font-bold text-white whitespace-nowrap select-none pointer-events-auto cursor-pointer hover:scale-110 active:scale-95 transition-all duration-150 group"
+                  className="bg-[#121212]/95 border-2 border-green-500 hover:border-green-400 hover:bg-green-950/60 px-2 py-0.5 rounded-lg shadow-[0_4px_15px_rgba(0,0,0,0.8)] flex items-center gap-1 text-[13px] font-mono font-bold text-white whitespace-nowrap select-none pointer-events-auto cursor-pointer hover:scale-110 active:scale-95 transition-all duration-150 group"
                   title="Editar Espesor (Y)"
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                  <span className="text-gray-400 text-[9px] font-sans">E:</span>
+                  <span className="text-gray-400 text-[12px] font-sans">E:</span>
                   <span className="text-green-400 text-xs font-black group-hover:underline">{currentDims.espesor}</span>
-                  <span className="text-[9px] text-gray-400 font-sans">mm</span>
+                  <span className="text-[12px] text-gray-400 font-sans">mm</span>
                 </button>
               </Html>
             </>
@@ -933,20 +998,25 @@ export default function ThreeViewer({
   interactMode,
   onToggleDynamicPiece
 }: ThreeViewerProps) {
+  const requestCameraView = (view: CameraView) => {
+    window.dispatchEvent(new CustomEvent<CameraView>('cad-camera-view', { detail: view }));
+  };
+
   return (
-    <div className="absolute inset-0 bg-transparent overflow-hidden">
+    <div className="absolute inset-0 bg-[#171c21] overflow-hidden">
       <Canvas 
         camera={{ position: [2, 2, 2], fov: 50 }}
         shadows
         onPointerMissed={() => onSelectPiece(null, false)}
       >
-        <color attach="background" args={['#393939']} />
-        <ambientLight intensity={1.5} />
-        <pointLight position={[10, 10, 10]} intensity={1} />
-        <spotLight position={[-10, 10, 10]} angle={0.15} penumbra={1} intensity={1} castShadow />
+        <color attach="background" args={['#171c21']} />
+        <ambientLight intensity={1.65} />
+        <hemisphereLight args={['#dce8f5', '#5f4937', 1.1]} />
+        <pointLight position={[10, 10, 10]} intensity={1.1} />
+        <spotLight position={[-10, 10, 10]} angle={0.2} penumbra={1} intensity={1.2} castShadow />
         
-        <gridHelper args={[20, 40, '#282828', '#282828']} position={[0, -0.001, 0]} />
-        <axesHelper args={[2]} />
+        <gridHelper args={[20, 80, '#343c45', '#242b32']} position={[0, -0.001, 0]} />
+        <axesHelper args={[1.25]} />
  
         {pieces.map((piece) => (
           piece.cantidad > 0 && Array.from({ length: piece.cantidad }).map((_, idx) => (
@@ -983,8 +1053,16 @@ export default function ThreeViewer({
           ))
         ))}
 
-        <OrbitControls makeDefault />
+        <SceneNavigation pieces={pieces} />
       </Canvas>
+
+      <nav className="camera-view-controls" aria-label="Vistas de cámara">
+        <button type="button" onClick={() => requestCameraView('iso')} title="Vista isométrica">ISO</button>
+        <button type="button" onClick={() => requestCameraView('front')} title="Vista frontal">Frente</button>
+        <button type="button" onClick={() => requestCameraView('top')} title="Vista superior">Arriba</button>
+        <button type="button" onClick={() => requestCameraView('right')} title="Vista lateral derecha">Lado</button>
+        <button type="button" onClick={() => requestCameraView('fit')} title="Encuadrar todo el mueble">Encajar</button>
+      </nav>
     </div>
   );
 }

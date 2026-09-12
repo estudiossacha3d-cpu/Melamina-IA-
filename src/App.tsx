@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, Ruler, Play, Pointer } from 'lucide-react';
+import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, Ruler, Play, Pointer, Undo2, Redo2, CheckCircle2, Scissors, PanelRightOpen, FilePlus2 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 import { interpretFurnitureImage, isAiConfigured } from './lib/gemini';
@@ -105,6 +105,28 @@ function useAppHistory(initialState: AppState) {
 
 type DeleteTarget = { type: 'all' } | { type: 'selected' } | { type: 'group', id: string, name: string } | { type: 'piece', id: string, name: string };
 
+type PieceOrientation = 'horizontal' | 'lateral' | 'frente';
+
+interface PieceDraft {
+  name: string;
+  largo: number;
+  ancho: number;
+  espesor: number;
+  cantidad: number;
+  material: string;
+  orientation: PieceOrientation;
+}
+
+const createPieceDraft = (index: number): PieceDraft => ({
+  name: `Pieza ${index}`,
+  largo: 600,
+  ancho: 400,
+  espesor: 18,
+  cantidad: 1,
+  material: 'Pelikano_Blanco_Absoluto',
+  orientation: 'horizontal',
+});
+
 export default function App() {
   const initialStateRef = useRef<AppState | null>(null);
   if (!initialStateRef.current) {
@@ -184,6 +206,10 @@ export default function App() {
   const [selectedPieceIds, setSelectedPieceIds] = useState<string[]>([]);
   const [editingDimensionsPieceId, setEditingDimensionsPieceId] = useState<string | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [newPieceDialogOpen, setNewPieceDialogOpen] = useState(false);
+  const [pieceDraft, setPieceDraft] = useState<PieceDraft>(() => createPieceDraft(1));
+  const [outlinerSearch, setOutlinerSearch] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
   const [sheetConfig, setSheetConfig] = useState<{ width: number; height: number; kerf: number; margin: number }>({
     width: 2440,
     height: 2140,
@@ -214,9 +240,9 @@ export default function App() {
   const [trayOpen, setTrayOpen] = useState({
     esquema: true,
     entidad: true,
-    dinamico: true,
-    materiales: true,
-    procesos: true,
+    dinamico: false,
+    materiales: false,
+    procesos: false,
   });
   
   const [interactMode, setInteractMode] = useState(false);
@@ -224,6 +250,20 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(appState));
   }, [appState]);
+
+  const showNotice = useCallback((message: string) => {
+    setNotice(message);
+    window.setTimeout(() => setNotice(current => current === message ? null : current), 2600);
+  }, []);
+
+  const totalPieceCount = pieces.reduce((sum, piece) => sum + Math.max(0, piece.cantidad || 0), 0);
+  const activePiece = pieces.find(piece => piece.id === selectedPieceIds[0]);
+  const normalizedOutlinerSearch = outlinerSearch.trim().toLowerCase();
+  const matchesOutlinerSearch = (piece: Piece) => !normalizedOutlinerSearch || [
+    piece.name,
+    piece.material || '',
+    `${Math.round(piece.largo)}x${Math.round(piece.ancho)}`,
+  ].some(value => value.toLowerCase().includes(normalizedOutlinerSearch));
 
   const toggleTray = (key: keyof typeof trayOpen) => {
     setTrayOpen(prev => ({ ...prev, [key]: !prev[key] }));
@@ -453,22 +493,42 @@ export default function App() {
       e.preventDefault();
       e.stopPropagation();
     }
+    setPieceDraft(createPieceDraft(totalPieceCount + 1));
+    setNewPieceDialogOpen(true);
+  };
+
+  const createPieceFromDraft = () => {
+    const largo = Math.max(10, Math.round(Number(pieceDraft.largo) || 0));
+    const ancho = Math.max(10, Math.round(Number(pieceDraft.ancho) || 0));
+    const espesor = Math.max(1, Math.round(Number(pieceDraft.espesor) || 0));
+    const cantidad = Math.max(1, Math.round(Number(pieceDraft.cantidad) || 1));
+    const orientation = pieceDraft.orientation;
+    const rotation3D: [number, number, number] = orientation === 'lateral'
+      ? [0, 0, Math.PI / 2]
+      : orientation === 'frente'
+        ? [Math.PI / 2, 0, 0]
+        : [0, 0, 0];
+    const height = orientation === 'lateral' ? largo : orientation === 'frente' ? ancho : espesor;
     const newPiece: Piece = {
       id: uuidv4(),
-      name: 'Nueva Pieza',
-      largo: 600,
-      ancho: 400,
-      espesor: 18,
-      cantidad: 1,
+      name: pieceDraft.name.trim() || `Pieza ${totalPieceCount + 1}`,
+      largo,
+      ancho,
+      espesor,
+      cantidad,
       cantos: { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' },
-      position3D: [0, 200, 0],
-      rotation3D: [0, 0, 0],
+      position3D: [0, height / 2, 0],
+      rotation3D,
       veta: false,
       ranurado: false,
-      abisagrado: false
+      abisagrado: false,
+      material: pieceDraft.material,
     };
     setPieces(prev => [...prev, newPiece]);
     setSelectedPieceIds([newPiece.id]);
+    setNewPieceDialogOpen(false);
+    setViewMode('3d');
+    showNotice(`${newPiece.name} creada en milímetros`);
   };
 
   const deletePiece = (id: string, e: React.MouseEvent) => {
@@ -482,7 +542,6 @@ export default function App() {
     if (!file) return;
 
     setIsProcessing(true);
-    setPieces([]);
     
     try {
       const reader = new FileReader();
@@ -500,8 +559,10 @@ export default function App() {
             rotation3D: p.rotation3D || [0, 0, 0]
           }));
           setPieces(sanitizedPieces);
+          setSelectedPieceIds([]);
+          showNotice(`${sanitizedPieces.length} piezas detectadas desde la imagen`);
         } catch (error) {
-          alert('Hubo un error al procesar la imagen de mueble.');
+          showNotice('No se pudo interpretar la imagen; tu proyecto no cambió');
         } finally {
           setIsProcessing(false);
         }
@@ -509,6 +570,7 @@ export default function App() {
       reader.readAsDataURL(file);
     } catch {
       setIsProcessing(false);
+      showNotice('No se pudo leer el archivo seleccionado');
     }
   };
 
@@ -558,6 +620,7 @@ export default function App() {
     a.download = `iamueble_${new Date().toISOString().slice(0,10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    showNotice('Proyecto descargado como archivo editable');
   };
 
   const handleExportCsv = () => {
@@ -568,12 +631,14 @@ export default function App() {
     a.download = `despiece_${new Date().toISOString().slice(0,10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+    showNotice('Despiece CSV listo para abrir en Excel');
   };
 
   const handleLoadStarterProject = () => {
     setAppState(createStarterProject());
     setSelectedPieceIds([]);
     setViewMode('3d');
+    showNotice('Módulo base cargado y listo para editar');
   };
 
   const handleLoadModel = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -583,21 +648,18 @@ export default function App() {
     reader.onload = (event) => {
       try {
         const data = JSON.parse(event.target?.result as string);
-        if (data && data.pieces && Array.isArray(data.pieces)) {
-          setAppState({
-            pieces: data.pieces,
-            groups: data.groups || []
-          });
-          setSelectedPieceIds([]);
-        } else if (Array.isArray(data)) {
-          setAppState({
-            pieces: data,
-            groups: []
-          });
-          setSelectedPieceIds([]);
+        const normalized = Array.isArray(data) ? { pieces: data, groups: [] } : data;
+        if (!isProjectState(normalized)) {
+          showNotice('El archivo no contiene un proyecto CAD válido');
+          return;
         }
+        setAppState(normalized);
+        setSelectedPieceIds([]);
+        setViewMode('3d');
+        showNotice(`Proyecto abierto: ${normalized.pieces.length} piezas`);
       } catch (err) {
         console.error("Failed to parse JSON", err);
+        showNotice('No se pudo abrir el archivo JSON');
       }
     };
     reader.readAsText(file);
@@ -605,6 +667,48 @@ export default function App() {
         loadFileInputRef.current.value = '';
     }
   };
+
+  useEffect(() => {
+    const handleKeyboard = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isEditing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.tagName === 'SELECT' || target?.isContentEditable;
+      const modifier = event.ctrlKey || event.metaKey;
+
+      if (modifier && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        handleSaveModel();
+        return;
+      }
+      if (modifier && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) redo(); else undo();
+        return;
+      }
+      if (isEditing) return;
+
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (selectedPieceIds.length > 0) {
+          event.preventDefault();
+          setDeleteConfirm({ type: 'selected' });
+        }
+      } else if (event.key === 'Escape') {
+        setNewPieceDialogOpen(false);
+        setEditingDimensionsPieceId(null);
+        setDidacticGuideOpen(false);
+        setSelectedPieceIds([]);
+      } else if (event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        addPiece();
+      } else if (event.key === '1') {
+        setViewMode('3d');
+      } else if (event.key === '2') {
+        setViewMode('2d');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyboard);
+    return () => window.removeEventListener('keydown', handleKeyboard);
+  }, [selectedPieceIds, undo, redo, totalPieceCount]);
 
   const executeDistribution = () => {
     if (arrayMode === 'between') {
@@ -685,7 +789,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#3d3d3d] text-[#cccccc] font-sans overflow-hidden select-none">
+    <div className="cad-shell flex flex-col h-[100dvh] bg-[#111417] text-[#d7dde5] font-sans overflow-hidden select-none">
       <input 
         type="file" 
         accept=".json" 
@@ -694,76 +798,86 @@ export default function App() {
         onChange={handleLoadModel} 
       />
       
-      {/* Blender Top Menu Bar */}
-      <header className="h-8 border-b border-[#1a1a1a] bg-[#1d1d1d] flex items-center justify-between px-2 shrink-0 relative z-30">
-        <div className="flex items-center space-x-1 sm:space-x-4">
-          <div className="flex items-center gap-1 px-2 py-0.5 hover:bg-[#4d4d4d] rounded cursor-default">
-            <Box className="w-3.5 h-3.5" />
-            <span className="text-[11px] font-medium hidden sm:inline">IA Mueble</span>
+      <header className="cad-header h-14 border-b border-[#2a3139] bg-[#15191e] flex items-center justify-between px-3 sm:px-4 shrink-0 relative z-40 shadow-lg">
+        <div className="flex items-center gap-3 min-w-0">
+          <button
+            type="button"
+            className="sm:hidden cad-icon-button"
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            aria-label="Abrir panel del proyecto"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-[#f0a144] text-[#16191d] flex items-center justify-center shadow-[0_0_0_1px_rgba(255,255,255,.08)]">
+              <Box className="w-5 h-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-extrabold text-white leading-tight truncate">Melamina IA</div>
+              <div className="text-[13px] text-[#8e99a6] leading-tight hidden sm:block">Diseño y corte en milímetros</div>
+            </div>
           </div>
-          <div className="hidden sm:flex items-center gap-1 border-l border-[#333] pl-3 ml-2">
-            <button 
-              className="flex items-center gap-1.5 px-2 py-1 hover:bg-[#333] rounded text-[10px]"
-              onClick={() => loadFileInputRef.current?.click()}
-            >
-              <FolderOpen className="w-3.5 h-3.5" /> Abrir
+          <div className="hidden xl:flex items-center gap-1 border-l border-[#303842] pl-3">
+            <button className="cad-action-button" onClick={() => loadFileInputRef.current?.click()} title="Abrir proyecto JSON">
+              <FolderOpen className="w-4 h-4" /> Abrir
             </button>
-            <button 
-              className="flex items-center gap-1.5 px-2 py-1 hover:bg-[#333] rounded text-[10px]"
-              onClick={handleSaveModel}
-            >
-              <Save className="w-3.5 h-3.5" /> Guardar
-            </button>
-            <button
-              className="flex items-center gap-1.5 px-2 py-1 hover:bg-[#333] rounded text-[10px]"
-              onClick={handleLoadStarterProject}
-              title="Cargar un módulo de 800 mm listo para editar"
-            >
-              <Box className="w-3.5 h-3.5" /> Módulo base
+            <button className="cad-action-button" onClick={handleSaveModel} title="Guardar una copia editable (Ctrl+S)">
+              <Save className="w-4 h-4" /> Guardar
             </button>
           </div>
         </div>
 
-        <div className="flex items-center space-x-2">
-          {/* Guía didáctica button */}
-          <button 
+        <nav className="hidden md:flex absolute left-1/2 -translate-x-1/2 items-center bg-[#0e1115] border border-[#303842] rounded-xl p-1" aria-label="Flujo principal">
+          <button
+            type="button"
+            onClick={() => setViewMode('3d')}
+            className={`cad-workspace-tab ${viewMode === '3d' ? 'is-active' : ''}`}
+          >
+            <Box className="w-4 h-4" />
+            <span><strong>1</strong> Diseño 3D</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('2d')}
+            className={`cad-workspace-tab ${viewMode === '2d' ? 'is-active' : ''}`}
+          >
+            <Scissors className="w-4 h-4" />
+            <span><strong>2</strong> Despiece y corte</span>
+          </button>
+        </nav>
+
+        <div className="flex items-center gap-2">
+          <button
             type="button"
             onClick={() => setDidacticGuideOpen(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#ec4899]/10 text-pink-400 border border-[#ec4899]/20 text-[10px] font-bold hover:bg-[#ec4899]/20 transition-all hover:scale-[1.02]"
-            title="Aprender sobre materiales y cantos reales"
+            className="cad-icon-button hidden sm:flex"
+            title="Guía de materiales y cantos"
+            aria-label="Abrir guía de carpintería"
           >
-            <Lightbulb className="w-3.5 h-3.5 animate-pulse text-pink-400" />
-            <span className="hidden sm:inline">Guía Carpintería</span>
+            <Lightbulb className="w-4 h-4" />
           </button>
-
-          <div className="flex bg-[#111111] rounded p-0.5 border border-[#333333]">
-            <button 
-              type="button"
-              onClick={() => setViewMode('3d')}
-              className={`px-3 py-0.5 rounded text-[10px] font-bold transition-colors ${viewMode === '3d' ? 'bg-[#565656] text-white shadow-inner' : 'hover:bg-[#333333] text-[#888888]'}`}
-            >
-              3D Viewport
-            </button>
-            <button 
-              type="button"
-              onClick={() => setViewMode('2d')}
-              className={`px-3 py-0.5 rounded text-[10px] font-bold transition-colors ${viewMode === '2d' ? 'bg-[#565656] text-white shadow-inner' : 'hover:bg-[#333333] text-[#888888]'}`}
-            >
-              Cortes
-            </button>
-          </div>
-          
-          <button 
+          <button
             type="button"
-            className="bg-[#306040] hover:bg-[#3c7850] text-[#cfcfcf] text-[10px] px-3 py-0.5 rounded font-bold transition-colors border border-[#1a1a1a] flex items-center gap-1"
+            className="cad-primary-button"
             onClick={handleExportCsv}
             disabled={pieces.length === 0}
-            title="Descargar despiece en CSV compatible con Excel"
+            title="Descargar el despiece para Excel"
           >
-            <Download className="w-3 h-3" /> Exportar CSV
+            <Download className="w-4 h-4" />
+            <span className="hidden sm:inline">Exportar despiece</span>
+            <span className="sm:hidden">CSV</span>
           </button>
         </div>
       </header>
+
+      <nav className="md:hidden h-11 bg-[#11151a] border-b border-[#2a3139] grid grid-cols-2 gap-1 p-1.5 shrink-0 z-30" aria-label="Flujo principal móvil">
+        <button type="button" onClick={() => setViewMode('3d')} className={`cad-workspace-tab justify-center ${viewMode === '3d' ? 'is-active' : ''}`}>
+          <Box className="w-4 h-4" /> Diseño 3D
+        </button>
+        <button type="button" onClick={() => setViewMode('2d')} className={`cad-workspace-tab justify-center ${viewMode === '2d' ? 'is-active' : ''}`}>
+          <Scissors className="w-4 h-4" /> Corte 2D
+        </button>
+      </nav>
 
       <div className="flex-1 flex overflow-hidden relative">
         
@@ -774,36 +888,43 @@ export default function App() {
           />
         )}
         
-        {/* Left Vertical Toolbar (Blender Style) */}
-        <div className="w-10 bg-[#2b2b2b] border-r border-[#1a1a1a] flex flex-col items-center py-2 gap-1 z-20">
-           <ToolbarIcon icon={<Menu />} active={false} onClick={() => setMobileMenuOpen(!mobileMenuOpen)} />
-           <div className="w-6 h-px bg-[#404040] my-1" />
-           <ToolbarIcon icon={<Plus />} active={false} onClick={addPiece} />
-           <ToolbarIcon icon={<Box />} active={false} onClick={handleLoadStarterProject} />
-           <ToolbarIcon icon={<Trash2 />} active={false} onClick={() => pieces.length > 0 && setDeleteConfirm({ type: 'all' })} />
+        <div className="hidden sm:flex w-[76px] bg-[#15191e] border-r border-[#2a3139] flex-col items-stretch px-2 py-3 gap-2 z-20">
+           <ToolbarIcon icon={<Plus />} label="Pieza" title="Crear una pieza (N)" active={false} onClick={addPiece} />
+           <ToolbarIcon icon={<Box />} label="Módulo" title="Cargar módulo base" active={false} onClick={handleLoadStarterProject} />
+           <div className="h-px bg-[#303842] my-1" />
+           <ToolbarIcon icon={<Undo2 />} label="Deshacer" title="Deshacer (Ctrl+Z)" active={false} disabled={!canUndo} onClick={() => undo()} />
+           <ToolbarIcon icon={<Redo2 />} label="Rehacer" title="Rehacer (Ctrl+Shift+Z)" active={false} disabled={!canRedo} onClick={() => redo()} />
+           <div className="h-px bg-[#303842] my-1" />
+           <ToolbarIcon icon={<Trash2 />} label="Limpiar" title="Eliminar todo" active={false} disabled={pieces.length === 0} onClick={() => pieces.length > 0 && setDeleteConfirm({ type: 'all' })} />
            {isAiConfigured && (
              <>
-               <div className="w-6 h-px bg-[#404040] my-1" />
-               <ToolbarIcon icon={<Upload />} active={false} onClick={() => fileInputRef.current?.click()} />
+               <div className="h-px bg-[#303842] my-1" />
+               <ToolbarIcon icon={<Upload />} label="Imagen" title="Reconocer mueble desde una imagen" active={false} onClick={() => fileInputRef.current?.click()} />
              </>
            )}
         </div>
 
         <div className="flex-1 relative flex flex-col">
-          {/* Top View Selector Bar */}
-          <div className="h-7 bg-[#333333]/80 backdrop-blur-sm border-b border-[#1a1a1a] flex items-center px-4 space-x-4 z-10">
-            <div className="flex items-center gap-1.5 text-[10px] font-bold text-[#aaaaaa]">
-              <span className="text-[#f0a144]">Object Mode</span>
+          <div className="h-10 bg-[#1a2026]/95 border-b border-[#2a3139] flex items-center px-3 sm:px-4 gap-3 z-10 shrink-0">
+            <div className="flex items-center gap-2 min-w-0 text-xs sm:text-sm">
+              {activePiece ? (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-[#f0a144] shrink-0" />
+                  <span className="font-semibold text-white truncate">{selectedPieceIds.length > 1 ? `${selectedPieceIds.length} piezas seleccionadas` : activePiece.name}</span>
+                  <span className="hidden sm:inline text-[#8e99a6] font-mono">{Math.round(activePiece.largo)} × {Math.round(activePiece.ancho)} × {Math.round(activePiece.espesor)} mm</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  <span className="text-[#aeb7c2]">{pieces.length ? 'Selecciona una pieza para editarla' : 'Crea una pieza o carga el módulo base'}</span>
+                </>
+              )}
             </div>
-            
             <div className="flex-1" />
-            
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-1 text-[10px] text-[#888888]">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                CAD/CAM: <span className="text-[#cccccc]">LISTO</span>
-              </div>
-            </div>
+            <button type="button" onClick={() => setMobileMenuOpen(true)} className="cad-action-button lg:hidden" aria-label="Abrir propiedades">
+              <PanelRightOpen className="w-4 h-4" /> <span className="hidden xs:inline">Propiedades</span>
+            </button>
+            <span className="hidden lg:inline text-xs text-[#8e99a6]">{totalPieceCount} piezas · mm</span>
           </div>
 
           <main className="flex-1 relative overflow-hidden w-full max-w-full">
@@ -876,6 +997,21 @@ export default function App() {
                   interactMode={interactMode}
                   onToggleDynamicPiece={handleToggleDynamicPiece}
                 />
+                {pieces.length === 0 && (
+                  <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none p-5">
+                    <div className="cad-empty-state pointer-events-auto">
+                      <div className="w-12 h-12 rounded-2xl bg-[#f0a144]/15 text-[#f0a144] flex items-center justify-center mx-auto">
+                        <FilePlus2 className="w-6 h-6" />
+                      </div>
+                      <h2>Empieza tu mueble</h2>
+                      <p>Crea cada tablero en milímetros o abre un módulo listo para modificar.</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button type="button" className="cad-primary-button justify-center" onClick={addPiece}><Plus className="w-4 h-4" /> Nueva pieza</button>
+                        <button type="button" className="cad-secondary-button justify-center" onClick={handleLoadStarterProject}><Box className="w-4 h-4" /> Módulo base</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <ThreeViewerOverlay 
                   pieces={pieces}
                   selectedPieceId={selectedPieceIds[0] || null}
@@ -926,47 +1062,54 @@ export default function App() {
             )}
           </main>
 
-          {/* Bottom Status Bar */}
-          <footer className="h-6 bg-[#2b2b2b] border-t border-[#1a1a1a] flex items-center px-4 justify-between text-[8px] sm:text-[9px] font-medium text-[#888888] shrink-0">
+          <footer className="h-8 bg-[#15191e] border-t border-[#2a3139] flex items-center px-3 sm:px-4 justify-between text-[13px] sm:text-xs font-medium text-[#8e99a6] shrink-0">
              <div className="flex items-center gap-2 sm:gap-4">
-               <span className="text-[#cccccc]"><span className="text-[#f0a144]">●</span> <span className="hidden sm:inline">Guardado local activo</span></span>
-               <span className="hidden sm:inline">Flujo CAD/CAM sin conexión externa</span>
+               <span className="text-[#cbd3dc] flex items-center gap-1.5"><CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> <span className="hidden sm:inline">Guardado automático</span></span>
                {activeDisplacement ? (
-                 <div className="flex items-center gap-2 font-mono bg-[#1b1b1b] px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144]">
-                   <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144] animate-ping" />
-                   <span className="font-bold text-[9px] sm:text-[10px]">
-                     DISTANCIA: <span className="text-white font-black">{activeDisplacement.dist} mm</span>
+                 <div className="flex items-center gap-2 font-mono bg-[#0e1115] px-2 py-1 rounded-lg border border-[#f0a144]/50 text-[#f0a144]">
+                   <span className="font-bold">
+                     Movimiento: <span className="text-white font-black">{activeDisplacement.dist} mm</span>
                    </span>
-                   <span className="text-[8px] sm:text-[9px] text-gray-300 flex items-center gap-1.5 border-l border-[#3a3a3a] pl-2">
+                   <span className="text-[#b9c2cc] hidden sm:flex items-center gap-1.5 border-l border-[#3a424d] pl-2">
                      <span className="text-red-400 font-bold">ΔX: {activeDisplacement.dx > 0 ? `+${activeDisplacement.dx}` : activeDisplacement.dx}</span>
                      <span className="text-green-400 font-bold">ΔY: {activeDisplacement.dy > 0 ? `+${activeDisplacement.dy}` : activeDisplacement.dy}</span>
                      <span className="text-blue-400 font-bold">ΔZ: {activeDisplacement.dz > 0 ? `+${activeDisplacement.dz}` : activeDisplacement.dz}</span>
                    </span>
                  </div>
                ) : (
-                 <div className="flex items-center gap-2 font-mono text-[#a0a0a0]">
-                   <span>DISTANCIA: <span className="text-white font-bold">0 mm</span></span>
-                   <span className="text-gray-500 hidden sm:inline">(ΔX: 0 | ΔY: 0 | ΔZ: 0)</span>
-                 </div>
+                 <span className="font-mono hidden sm:inline">{totalPieceCount} piezas · {groups.length} grupos</span>
                )}
              </div>
              <div className="flex items-center gap-2 sm:gap-4">
-               <span className="hidden sm:inline">Units: Metric (mm)</span>
-               <span className="text-[#cccccc]">v0.5.0</span>
+               <span className="hidden sm:inline">Unidades: milímetros</span>
+               <span className="text-[#cbd3dc]">v0.8</span>
              </div>
           </footer>
         </div>
 
-        {/* Right Sidebar: SketchUp Style Default Tray */}
         {viewMode === '3d' ? (
-          <aside className={"w-[260px] sm:w-[280px] bg-[#1e1e1e] border-l border-[#111111] flex flex-col shrink-0 z-20 absolute right-0 top-0 bottom-0 transition-transform lg:relative lg:translate-x-0 " + (mobileMenuOpen ? "translate-x-0" : "translate-x-full")}>
+          <aside className={"w-[min(92vw,340px)] bg-[#171b20] border-l border-[#2a3139] flex flex-col shrink-0 z-30 absolute right-0 top-0 bottom-0 transition-transform lg:relative lg:translate-x-0 shadow-2xl lg:shadow-none " + (mobileMenuOpen ? "translate-x-0" : "translate-x-full")}>
             
-            {/* Sidebar Title / Default Tray Header */}
-            <div className="h-8 bg-[#2d2d2d] border-b border-[#111111] flex items-center justify-between px-2.5 shrink-0 select-none">
-              <span className="text-[10px] font-black uppercase text-[#e5e5e5] tracking-wider font-sans">Bandeja predeterminada</span>
-              <div className="flex items-center gap-1.5">
-                <span className="text-[7px] text-[#ee5253] font-bold bg-[#ee5253]/10 px-1 py-0.5 rounded border border-[#ee5253]/20">ACTIVA</span>
+            <div className="min-h-14 bg-[#1d232a] border-b border-[#2a3139] flex items-center justify-between px-4 py-2 shrink-0 select-none">
+              <div>
+                <div className="text-sm font-bold text-white">Proyecto e inspector</div>
+                <div className="text-[13px] text-[#8e99a6]">Selecciona una pieza para editarla</div>
               </div>
+              <button type="button" className="cad-icon-button lg:hidden" onClick={() => setMobileMenuOpen(false)} aria-label="Cerrar propiedades">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-1.5 p-2.5 bg-[#15191e] border-b border-[#2a3139] shrink-0">
+              <button type="button" className="cad-secondary-button justify-center px-1" onClick={() => loadFileInputRef.current?.click()} title="Abrir proyecto JSON">
+                <FolderOpen className="w-4 h-4" /> <span>Abrir</span>
+              </button>
+              <button type="button" className="cad-secondary-button justify-center px-1" onClick={handleSaveModel} title="Guardar copia editable">
+                <Save className="w-4 h-4" /> <span>Guardar</span>
+              </button>
+              <button type="button" className="cad-secondary-button justify-center px-1" onClick={addPiece} title="Crear una pieza">
+                <Plus className="w-4 h-4" /> <span>Pieza</span>
+              </button>
             </div>
 
             {/* Scrollable Trays Area */}
@@ -978,32 +1121,43 @@ export default function App() {
                   onClick={() => toggleTray('esquema')}
                   className="h-7 bg-[#262626] hover:bg-[#2d2d2d] flex items-center justify-between px-2 cursor-pointer select-none transition-colors border-t border-[#3c3c3c]/30 border-b border-[#151515]"
                 >
-                  <div className="flex items-center gap-1.5 text-[9px] font-bold text-[#dddddd] uppercase tracking-wider">
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-[#dddddd] uppercase tracking-wider">
                     {trayOpen.esquema ? (
                       <ChevronDown className="w-3.5 h-3.5 text-[#f0a144]" />
                     ) : (
                       <ChevronRight className="w-3.5 h-3.5 text-[#888888]" />
                     )}
-                    <span>Esquema</span>
+                    <span>Piezas del proyecto</span>
                   </div>
-                  <div className="flex items-center gap-1 text-[8px] text-[#888888]">
+                  <div className="flex items-center gap-1 text-[11px] text-[#888888]">
                     <Layers className="w-2.5 h-2.5 text-emerald-400" />
-                    <span className="font-mono text-[7px] bg-[#111] px-1 rounded text-[#888]">
-                      {pieces.length} OBJ
+                    <span className="font-mono text-[11px] bg-[#111] px-1 rounded text-[#888]">
+                      {totalPieceCount} piezas
                     </span>
                   </div>
                 </div>
 
                 {trayOpen.esquema && (
-                  <div className="bg-[#232323] p-1.5 font-mono animate-in fade-in duration-100 max-h-[220px] overflow-y-auto">
-                     <div className="flex items-center gap-1.5 px-2 py-1 text-[#cccccc] hover:bg-[#3d3d3d] rounded cursor-default group">
+                  <div className="bg-[#1b2026] p-2.5 font-mono animate-in fade-in duration-100 max-h-[280px] overflow-y-auto">
+                     <label className="relative block mb-2">
+                       <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#74808d]" />
+                       <input
+                         type="search"
+                         value={outlinerSearch}
+                         onChange={(event) => setOutlinerSearch(event.target.value)}
+                         placeholder="Buscar nombre, medida o material"
+                         className="w-full bg-[#0f1317] border border-[#323a44] rounded-lg pl-8 pr-2 py-2 text-xs text-white outline-none focus:border-[#f0a144]"
+                       />
+                     </label>
+                     <div className="flex items-center gap-1.5 px-2 py-1.5 text-[#d5dbe2] rounded-lg cursor-default group">
                        <Box className="w-3 h-3 text-[#f0a144]" />
-                       <span className="text-[10px]">Scene Collection</span>
+                       <span className="text-xs font-semibold">Proyecto actual</span>
                      </div>
                      <div className="ml-4 space-y-0.5 mt-1 border-l border-[#333] pl-1">
                        {/* Groups */}
                        {groups.map(group => {
-                         const groupPieces = pieces.filter(p => p.groupId === group.id);
+                         const groupPieces = pieces.filter(p => p.groupId === group.id && matchesOutlinerSearch(p));
+                         if (normalizedOutlinerSearch && groupPieces.length === 0) return null;
                          const isGroupSelected = groupPieces.length > 0 && groupPieces.every(p => selectedPieceIds.includes(p.id));
                          
                          return (
@@ -1013,7 +1167,7 @@ export default function App() {
                                   const ids = groupPieces.map(p => p.id);
                                   setSelectedPieceIds(ids);
                                 }}
-                                className={"flex items-center group/item gap-2 px-2 py-0.5 text-[10px] rounded cursor-default " + (isGroupSelected ? "bg-[#3b4b5b] text-white outline outline-1 outline-[#3b82f6]" : "text-emerald-400/80 hover:bg-[#3d3d3d]")}
+                                className={"flex items-center group/item gap-2 px-2 py-0.5 text-[12px] rounded cursor-default " + (isGroupSelected ? "bg-[#3b4b5b] text-white outline outline-1 outline-[#3b82f6]" : "text-emerald-400/80 hover:bg-[#3d3d3d]")}
                               >
                                 <Combine className="w-2.5 h-2.5 shrink-0" />
                                 <input 
@@ -1040,7 +1194,7 @@ export default function App() {
                                       e.stopPropagation();
                                       toggleSelection(piece.id, e.shiftKey);
                                     }}
-                                    className={"flex items-center group/piece gap-2 px-2 py-0.5 text-[9px] rounded cursor-default " + (selectedPieceIds.includes(piece.id) ? "bg-[#565656] text-white outline outline-1 outline-[#f0a144]" : "text-[#888888] hover:bg-[#3d3d3d]")}
+                                    className={"flex items-center group/piece gap-2 px-2 py-0.5 text-[12px] rounded cursor-default " + (selectedPieceIds.includes(piece.id) ? "bg-[#565656] text-white outline outline-1 outline-[#f0a144]" : "text-[#888888] hover:bg-[#3d3d3d]")}
                                   >
                                     <Box className="w-2 h-2 shrink-0" />
                                     <input 
@@ -1066,11 +1220,11 @@ export default function App() {
                        })}
 
                        {/* Ungrouped Pieces */}
-                       {pieces.filter(p => !p.groupId).map((piece, idx) => (
+                       {pieces.filter(p => !p.groupId && matchesOutlinerSearch(p)).map((piece, idx) => (
                           <div 
                             key={piece.id}
                             onClick={(e) => toggleSelection(piece.id, e.shiftKey)}
-                            className={"flex items-center group/piece gap-2 px-2 py-0.5 text-[10px] rounded cursor-default " + (selectedPieceIds.includes(piece.id) ? "bg-[#565656] text-white outline outline-1 outline-[#f0a144]" : "text-[#999999] hover:bg-[#3d3d3d]")}
+                            className={"flex items-center group/piece gap-2 px-2 py-0.5 text-[12px] rounded cursor-default " + (selectedPieceIds.includes(piece.id) ? "bg-[#565656] text-white outline outline-1 outline-[#f0a144]" : "text-[#999999] hover:bg-[#3d3d3d]")}
                           >
                             <Box className="w-2.5 h-2.5 shrink-0" />
                             <input 
@@ -1102,21 +1256,21 @@ export default function App() {
                   onClick={() => toggleTray('entidad')}
                   className="h-7 bg-[#262626] hover:bg-[#2d2d2d] flex items-center justify-between px-2 cursor-pointer select-none transition-colors border-t border-[#3c3c3c]/30 border-b border-[#151515]"
                 >
-                  <div className="flex items-center gap-1.5 text-[9px] font-bold text-[#dddddd] uppercase tracking-wider">
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-[#dddddd] uppercase tracking-wider">
                     {trayOpen.entidad ? (
                       <ChevronDown className="w-3.5 h-3.5 text-[#f0a144]" />
                     ) : (
                       <ChevronRight className="w-3.5 h-3.5 text-[#888888]" />
                     )}
-                    <span>Información de la entidad</span>
+                    <span>Medidas y posición</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-[7.5px] font-mono text-[#888888]">INFO</span>
+                    <span className="text-[13px] font-mono text-[#888888]">INFO</span>
                   </div>
                 </div>
 
                 {trayOpen.entidad && (
-                  <div className="bg-[#1e1e1e] p-3 text-[10px] text-[#ccc] space-y-3 animate-in fade-in duration-100">
+                  <div className="bg-[#1e1e1e] p-3 text-[12px] text-[#ccc] space-y-3 animate-in fade-in duration-100">
                     {selectedPieceIds.length > 0 ? (
                       <div className="space-y-3">
                         {/* Group info if any */}
@@ -1126,16 +1280,16 @@ export default function App() {
                            if (group) {
                              return (
                                <div className="flex flex-col p-2 bg-[#3b82f6]/5 border border-[#3b82f6]/20 rounded space-y-1">
-                                 <span className="text-[7px] font-black text-[#3b82f6] uppercase">Propiedades del Grupo</span>
+                                 <span className="text-[11px] font-black text-[#3b82f6] uppercase">Propiedades del Grupo</span>
                                  <div className="flex flex-col">
-                                   <span className="text-[6.5px] text-[#888] mb-0.5 uppercase">Nombre grupo</span>
+                                   <span className="text-[13px] text-[#888] mb-0.5 uppercase">Nombre grupo</span>
                                    <input 
                                      type="text" 
                                      value={group.name}
                                      onChange={(e) => {
                                        setGroups(prev => prev.map(g => g.id === group.id ? { ...g, name: e.target.value } : g));
                                      }}
-                                     className="bg-[#111111] border border-[#333333] text-[9.5px] text-white px-1.5 py-0.5 rounded outline-none w-full focus:border-[#3b82f6]"
+                                     className="bg-[#111111] border border-[#333333] text-[12px] text-white px-1.5 py-0.5 rounded outline-none w-full focus:border-[#3b82f6]"
                                    />
                                  </div>
                                </div>
@@ -1146,18 +1300,18 @@ export default function App() {
 
                         {/* Edit piece name */}
                         <div className="flex flex-col gap-1">
-                          <label className="text-[7.5px] font-bold text-[#888888] uppercase">Nombre del Objeto</label>
+                          <label className="text-[13px] font-bold text-[#888888] uppercase">Nombre de la pieza</label>
                           <input 
                             type="text" 
                             value={pieces.find(p => p.id === selectedPieceIds[0])?.name || ''}
                             onChange={(e) => updatePiece(selectedPieceIds[0], { name: e.target.value })}
-                            className="bg-[#111111] border border-[#333333] text-[10px] text-white px-2 py-1 rounded outline-none focus:border-[#f0a144] w-full"
+                            className="bg-[#111111] border border-[#333333] text-[12px] text-white px-2 py-1 rounded outline-none focus:border-[#f0a144] w-full"
                           />
                         </div>
 
                         {/* Dimensions */}
                         <div className="space-y-1.5">
-                          <label className="text-[7.5px] font-bold text-[#888888] uppercase">Dimensiones (Cortes)</label>
+                          <label className="text-[13px] font-bold text-[#888888] uppercase">Medidas de corte · mm</label>
                           <div className="grid grid-cols-1 gap-1">
                             <PropertyField 
                               label="Largo (X)" 
@@ -1181,8 +1335,8 @@ export default function App() {
                         </div>
                       </div>
                     ) : (
-                      <div className="text-center text-[9px] text-[#666] py-3 italic">
-                        Selecciona una pieza para ver su información
+                      <div className="text-center text-[12px] text-[#666] py-3 italic">
+                        Selecciona una pieza en el modelo o en la lista
                       </div>
                     )}
                   </div>
@@ -1195,21 +1349,21 @@ export default function App() {
                   onClick={() => toggleTray('materiales')}
                   className="h-7 bg-[#262626] hover:bg-[#2d2d2d] flex items-center justify-between px-2 cursor-pointer select-none transition-colors border-t border-[#3c3c3c]/30 border-b border-[#151515]"
                 >
-                  <div className="flex items-center gap-1.5 text-[9px] font-bold text-[#dddddd] uppercase tracking-wider">
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-[#dddddd] uppercase tracking-wider">
                     {trayOpen.materiales ? (
                       <ChevronDown className="w-3.5 h-3.5 text-[#f0a144]" />
                     ) : (
                       <ChevronRight className="w-3.5 h-3.5 text-[#888888]" />
                     )}
-                    <span>Materiales</span>
+                    <span>Material y acabado</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-[7.5px] font-mono text-[#888888]">PBR</span>
+                    <span className="text-[13px] font-mono text-[#888888]">TABLERO</span>
                   </div>
                 </div>
 
                 {trayOpen.materiales && (
-                  <div className="bg-[#1e1e1e] p-3 text-[10px] text-[#ccc] animate-in fade-in duration-100">
+                  <div className="bg-[#1e1e1e] p-3 text-[12px] text-[#ccc] animate-in fade-in duration-100">
                     {selectedPieceIds.length > 0 ? (
                       (() => {
                         const p = pieces.find(pi => pi.id === selectedPieceIds[0]);
@@ -1240,17 +1394,16 @@ export default function App() {
 
                         return (
                           <div className="space-y-2">
-                            {/* Blender surface layout simulator */}
-                            <div className="flex items-center justify-between border-b border-[#2a2a2a] pb-1 text-[8px] font-bold text-[#888888]">
+                            <div className="flex items-center justify-between border-b border-[#2a2a2a] pb-1 text-[11px] font-bold text-[#888888]">
                               <span className="flex items-center gap-1 text-[#f0a144]">
-                                ▼ Principled BSDF
+                                ▼ Acabado visual
                               </span>
-                              <span className="text-[#64748b] text-[6px] tracking-wider font-mono">CYCLES ENGINE</span>
+                              <span className="text-[#64748b] text-[11px] tracking-wider font-mono">VISTA 3D</span>
                             </div>
 
                             {/* Template dropdown */}
                             <div className="grid grid-cols-3 items-center gap-1.5">
-                              <span className="text-[7.5px] font-bold text-[#88] uppercase text-right">Material</span>
+                              <span className="text-[13px] font-bold text-[#88] uppercase text-right">Material</span>
                               <select 
                                 value={matName}
                                 onChange={(e) => {
@@ -1262,7 +1415,7 @@ export default function App() {
                                     customMetalness: val === 'Custom' ? metVal : undefined
                                   });
                                 }}
-                                className="col-span-2 bg-[#111111] border border-[#33] rounded px-1.5 py-0.5 text-white text-[9px] outline-none cursor-pointer focus:border-[#f0a144]"
+                                className="col-span-2 bg-[#111111] border border-[#33] rounded px-1.5 py-0.5 text-white text-[12px] outline-none cursor-pointer focus:border-[#f0a144]"
                               >
                                 {Object.entries(getGroupedMaterials()).map(([brand, items]) => (
                                   <optgroup key={brand} label={brand} className="text-[#888] bg-[#111] font-bold">
@@ -1274,14 +1427,14 @@ export default function App() {
                                   </optgroup>
                                 ))}
                                 <optgroup label="Avanzado" className="text-[#888] bg-[#111] font-bold">
-                                  <option value="Custom" className="text-white bg-[#111] font-normal">🎨 Personalizado (PBR)</option>
+                                  <option value="Custom" className="text-white bg-[#111] font-normal">🎨 Acabado personalizado</option>
                                 </optgroup>
                               </select>
                             </div>
 
                             {/* Base Color Picker */}
                             <div className="grid grid-cols-3 items-center gap-1.5">
-                              <span className="text-[7.5px] font-bold text-[#88] uppercase text-right">Color Base</span>
+                              <span className="text-[13px] font-bold text-[#88] uppercase text-right">Color Base</span>
                               <div className="col-span-2 flex items-center gap-1.5">
                                 <input 
                                   type="color" 
@@ -1299,14 +1452,14 @@ export default function App() {
                                       updatePiece(p.id, { customColor: val, material: 'Custom' });
                                     }
                                   }}
-                                  className="flex-1 bg-[#111111] border border-[#33] text-[9px] font-mono text-center text-white py-0.5 rounded outline-none w-0 min-w-0 focus:border-[#f0a144]"
+                                  className="flex-1 bg-[#111111] border border-[#33] text-[12px] font-mono text-center text-white py-0.5 rounded outline-none w-0 min-w-0 focus:border-[#f0a144]"
                                 />
                               </div>
                             </div>
 
                             {/* Metalness Slider */}
                             <div className="grid grid-cols-3 items-center gap-1.5">
-                              <span className="text-[7.5px] font-bold text-[#88] uppercase text-right">Metallic</span>
+                              <span className="text-[13px] font-bold text-[#88] uppercase text-right">Reflejo</span>
                               <div className="col-span-2 flex items-center gap-1">
                                 <input 
                                   type="range" 
@@ -1317,13 +1470,13 @@ export default function App() {
                                   onChange={(e) => updatePiece(p.id, { customMetalness: parseFloat(e.target.value), material: 'Custom' })}
                                   className="flex-1 h-1 bg-[#2e2e2e] rounded-lg cursor-pointer appearance-none accent-[#f0a144]"
                                 />
-                                <span className="text-[7.5px] font-mono text-[#88] w-6 text-right">{metVal.toFixed(2)}</span>
+                                <span className="text-[13px] font-mono text-[#88] w-6 text-right">{metVal.toFixed(2)}</span>
                               </div>
                             </div>
 
                             {/* Roughness Slider */}
                             <div className="grid grid-cols-3 items-center gap-1.5">
-                              <span className="text-[7.5px] font-bold text-[#88] uppercase text-right">Roughness</span>
+                              <span className="text-[13px] font-bold text-[#88] uppercase text-right">Textura mate</span>
                               <div className="col-span-2 flex items-center gap-1">
                                 <input 
                                   type="range" 
@@ -1334,23 +1487,23 @@ export default function App() {
                                   onChange={(e) => updatePiece(p.id, { customRoughness: parseFloat(e.target.value), material: 'Custom' })}
                                   className="flex-1 h-1 bg-[#2e2e2e] rounded-lg cursor-pointer appearance-none accent-[#f0a144]"
                                 />
-                                <span className="text-[7.5px] font-mono text-[#88] w-6 text-right">{roughVal.toFixed(2)}</span>
+                                <span className="text-[13px] font-mono text-[#88] w-6 text-right">{roughVal.toFixed(2)}</span>
                               </div>
                             </div>
 
                             {/* PBR Didactic Tips & Warnings */}
                             <div className="mt-1.5 pt-1.5 border-t border-[#2a2a2a] space-y-1">
-                              <div className="flex justify-between items-center text-[6.5px] text-[#666]">
-                                 <span>COMPORTAMIENTO FISICO:</span>
+                              <div className="flex justify-between items-center text-[13px] text-[#666]">
+                                 <span>RESULTADO VISUAL:</span>
                                  <span className="text-[#f0a144] font-bold">{feedbackText}</span>
                               </div>
-                              <p className="text-[7.5px] leading-snug text-[#999999] bg-[#111111] p-1.5 rounded border border-[#2b2b2b] italic">
+                              <p className="text-[13px] leading-snug text-[#999999] bg-[#111111] p-1.5 rounded border border-[#2b2b2b] italic">
                                 {tipText}
                               </p>
 
                               {/* Edgebanding risk indicator */}
                               {hasUnbandedEdges && (
-                                <div className="bg-amber-500/10 border border-amber-500/25 p-1.5 rounded text-[7.5px] text-amber-400 leading-snug">
+                                <div className="bg-amber-500/10 border border-amber-500/25 p-1.5 rounded text-[13px] text-amber-400 leading-snug">
                                   <strong>⚠️ Alerta de Fabricación:</strong> Esta pieza tiene cantos en aserrado visto (madera interna). El aglomerado sin tapar absorberá humedad y se hinchará. ¡Añade cantos (DEL / GRU) para sellarla!
                                 </div>
                               )}
@@ -1359,7 +1512,7 @@ export default function App() {
                         );
                       })()
                     ) : (
-                      <div className="text-center text-[9px] text-[#666] py-3 italic">
+                      <div className="text-center text-[12px] text-[#666] py-3 italic">
                         Selecciona una pieza para ver sus materiales
                       </div>
                     )}
@@ -1373,7 +1526,7 @@ export default function App() {
                   onClick={() => toggleTray('procesos')}
                   className="h-7 bg-[#262626] hover:bg-[#2d2d2d] flex items-center justify-between px-2 cursor-pointer select-none transition-colors border-t border-[#3c3c3c]/30 border-b border-[#151515]"
                 >
-                  <div className="flex items-center gap-1.5 text-[9px] font-bold text-[#dddddd] uppercase tracking-wider">
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-[#dddddd] uppercase tracking-wider">
                     {trayOpen.procesos ? (
                       <ChevronDown className="w-3.5 h-3.5 text-[#f0a144]" />
                     ) : (
@@ -1382,12 +1535,12 @@ export default function App() {
                     <span>Procesos y cantos</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-[7.5px] font-mono text-[#888888]">CANTOS</span>
+                    <span className="text-[13px] font-mono text-[#888888]">CANTOS</span>
                   </div>
                 </div>
 
                 {trayOpen.procesos && (
-                  <div className="bg-[#1e1e1e] p-3 text-[10px] text-[#ccc] space-y-2 animate-in fade-in duration-100">
+                  <div className="bg-[#1e1e1e] p-3 text-[12px] text-[#ccc] space-y-2 animate-in fade-in duration-100">
                     {selectedPieceIds.length > 0 ? (
                       (() => {
                         const activePiece = pieces.find(p => p.id === selectedPieceIds[0]);
@@ -1400,8 +1553,8 @@ export default function App() {
                                 className={"p-1.5 rounded border flex flex-col items-center gap-1 cursor-pointer transition-colors " + (activePiece.veta ? "bg-[#f0a144]/10 border-[#f0a144]" : "bg-[#1a1a1a] border-[#333333] hover:border-[#4d4d4d]")}
                                 onClick={() => updatePiece(activePiece.id, { veta: !activePiece.veta })}
                               >
-                                <span className="text-[8px] font-bold">VETA</span>
-                                <span className="text-[7px] text-[#883] font-bold">{activePiece.veta ? 'SÍ' : 'NO'}</span>
+                                <span className="text-[11px] font-bold">VETA</span>
+                                <span className="text-[11px] text-[#883] font-bold">{activePiece.veta ? 'SÍ' : 'NO'}</span>
                               </div>
                               <div 
                                 className={"p-1.5 rounded border flex flex-col items-center gap-1 cursor-pointer transition-colors " + (activePiece.ranurado ? "bg-[#f0a144]/10 border-[#f0a144]" : "bg-[#1a1a1a] border-[#333333] hover:border-[#4d4d4d]")}
@@ -1413,8 +1566,8 @@ export default function App() {
                                    });
                                 }}
                               >
-                                <span className="text-[8px] font-bold">RANURA</span>
-                                <span className="text-[7px] text-[#883] font-bold">{activePiece.ranurado ? 'SÍ' : 'NO'}</span>
+                                <span className="text-[11px] font-bold">RANURA</span>
+                                <span className="text-[11px] text-[#883] font-bold">{activePiece.ranurado ? 'SÍ' : 'NO'}</span>
                               </div>
                             </div>
 
@@ -1424,19 +1577,19 @@ export default function App() {
                               
                               return (
                                 <div className="mt-1 bg-[#141414] border border-[#232323] p-1.5 rounded space-y-1">
-                                  <div className="flex items-center justify-between text-[8px] font-bold text-[#f0a144] uppercase border-b border-[#222] pb-0.5">
+                                  <div className="flex items-center justify-between text-[11px] font-bold text-[#f0a144] uppercase border-b border-[#222] pb-0.5">
                                     <span>⚙️ Configuración de Ranura</span>
-                                    <span className="text-[#64748b] text-[6.5px]">sketchup plugin</span>
+                                    <span className="text-[#64748b] text-[13px]">TALLER</span>
                                   </div>
                                   <div className="grid grid-cols-2 gap-1.5">
                                     <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">LADO</label>
+                                      <label className="text-[#888] font-bold text-[13px] uppercase">LADO</label>
                                       <select 
                                         value={config.lado}
                                         onChange={(e) => updatePiece(activePiece.id, { 
                                           ranuraConfig: { ...config, lado: e.target.value as any } 
                                         })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none cursor-pointer focus:border-[#f0a144]"
+                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[11px] outline-none cursor-pointer focus:border-[#f0a144]"
                                       >
                                         <option value="L1">L1 (Largo Frente)</option>
                                         <option value="L2">L2 (Largo Atrás)</option>
@@ -1446,38 +1599,38 @@ export default function App() {
                                     </div>
                                     
                                     <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">DIST (mm)</label>
+                                      <label className="text-[#888] font-bold text-[13px] uppercase">DIST (mm)</label>
                                       <input 
                                         type="number" 
                                         value={config.dist}
                                         onChange={(e) => updatePiece(activePiece.id, { 
                                           ranuraConfig: { ...config, dist: parseFloat(e.target.value) || 0 } 
                                         })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none font-mono focus:border-[#f0a144]"
+                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[11px] outline-none font-mono focus:border-[#f0a144]"
                                       />
                                     </div>
                                     
                                     <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">ESP (mm)</label>
+                                      <label className="text-[#888] font-bold text-[13px] uppercase">ESP (mm)</label>
                                       <input 
                                         type="number" 
                                         value={config.esp}
                                         onChange={(e) => updatePiece(activePiece.id, { 
                                           ranuraConfig: { ...config, esp: parseFloat(e.target.value) || 0 } 
                                         })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none font-mono focus:border-[#f0a144]"
+                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[11px] outline-none font-mono focus:border-[#f0a144]"
                                       />
                                     </div>
                                     
                                     <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">PROF (mm)</label>
+                                      <label className="text-[#888] font-bold text-[13px] uppercase">PROF (mm)</label>
                                       <input 
                                         type="number" 
                                         value={config.prof}
                                         onChange={(e) => updatePiece(activePiece.id, { 
                                           ranuraConfig: { ...config, prof: parseFloat(e.target.value) || 0 } 
                                         })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none font-mono focus:border-[#f0a144]"
+                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[11px] outline-none font-mono focus:border-[#f0a144]"
                                       />
                                     </div>
                                   </div>
@@ -1493,11 +1646,11 @@ export default function App() {
                                 
                                 return (
                                   <div key={edge} className={"flex flex-col bg-[#111111] p-1 border border-[#333333] rounded border-b-2 " + borderColor}>
-                                    <span className="text-[7px] text-[#666666] font-black uppercase text-center">{edge === 'largo1' ? 'L1' : edge === 'largo2' ? 'L2' : edge === 'ancho1' ? 'A1' : 'A2'}</span>
+                                    <span className="text-[11px] text-[#666666] font-black uppercase text-center">{edge === 'largo1' ? 'L1' : edge === 'largo2' ? 'L2' : edge === 'ancho1' ? 'A1' : 'A2'}</span>
                                     <select 
                                        value={val}
                                        onChange={(e) => updateEdge(activePiece.id, edge, e.target.value as any)}
-                                       className="bg-transparent border-0 text-[8px] outline-none text-center appearance-none cursor-pointer text-[#cccccc] hover:text-white w-full"
+                                       className="bg-transparent border-0 text-[11px] outline-none text-center appearance-none cursor-pointer text-[#cccccc] hover:text-white w-full"
                                     >
                                        <option value="Ninguno" className="bg-[#2e2e2e]">NO</option>
                                        <option value="Canto Delgado" className="bg-[#2e2e2e]">DEL (Azul)</option>
@@ -1522,14 +1675,14 @@ export default function App() {
 
                               return (
                                 <div className="space-y-2 mt-3 p-2 bg-[#161616] border border-[#2b2b2b] rounded">
-                                  <div className="flex items-center justify-between border-b border-[#2a2a2a] pb-1 text-[8px] font-bold text-[#888888]">
+                                  <div className="flex items-center justify-between border-b border-[#2a2a2a] pb-1 text-[11px] font-bold text-[#888888]">
                                     <span className="flex items-center gap-1 text-[#f0a144]">
                                       🎨 Color de Cantos Independiente
                                     </span>
-                                    <span className="text-[#64748b] text-[6px] tracking-wider font-mono">CLIENTE</span>
+                                    <span className="text-[#64748b] text-[11px] tracking-wider font-mono">CLIENTE</span>
                                   </div>
 
-                                  <div className="flex items-center justify-between text-[8px] py-0.5">
+                                  <div className="flex items-center justify-between text-[11px] py-0.5">
                                     <span className="text-[#aaa] font-bold">Personalizar color de cantos:</span>
                                     <label className="relative inline-flex items-center cursor-pointer">
                                       <input 
@@ -1551,7 +1704,7 @@ export default function App() {
                                   {activePiece.cantoColor !== undefined && (
                                     <div className="space-y-1.5 pt-1.5 border-t border-[#222] animate-in slide-in-from-top-1 duration-150">
                                       <div className="grid grid-cols-3 items-center gap-1.5">
-                                        <span className="text-[7.5px] font-bold text-[#888] uppercase text-right">Material</span>
+                                        <span className="text-[13px] font-bold text-[#888] uppercase text-right">Material</span>
                                         <select 
                                           value={(() => {
                                             const matchedKey = Object.keys(MATERIAL_MAP).find(
@@ -1565,7 +1718,7 @@ export default function App() {
                                               updatePiece(activePiece.id, { cantoColor: MATERIAL_MAP[val].color });
                                             }
                                           }}
-                                          className="col-span-2 bg-[#111111] border border-[#33] rounded px-1.5 py-0.5 text-white text-[9px] outline-none cursor-pointer focus:border-[#f0a144]"
+                                          className="col-span-2 bg-[#111111] border border-[#33] rounded px-1.5 py-0.5 text-white text-[12px] outline-none cursor-pointer focus:border-[#f0a144]"
                                         >
                                           {Object.entries(getGroupedMaterials()).map(([brand, items]) => (
                                             <optgroup key={brand} label={brand} className="text-[#888] bg-[#111] font-bold">
@@ -1583,7 +1736,7 @@ export default function App() {
                                       </div>
 
                                       <div className="grid grid-cols-3 items-center gap-1.5">
-                                        <span className="text-[7.5px] font-bold text-[#888] uppercase text-right">Color Canto</span>
+                                        <span className="text-[13px] font-bold text-[#888] uppercase text-right">Color Canto</span>
                                         <div className="col-span-2 flex items-center gap-1.5">
                                           <input 
                                             type="color" 
@@ -1601,7 +1754,7 @@ export default function App() {
                                                 updatePiece(activePiece.id, { cantoColor: val });
                                               }
                                             }}
-                                            className="flex-1 bg-[#111111] border border-[#33] text-[9px] font-mono text-center text-white py-0.5 rounded outline-none w-0 min-w-0 focus:border-[#f0a144]"
+                                            className="flex-1 bg-[#111111] border border-[#33] text-[12px] font-mono text-center text-white py-0.5 rounded outline-none w-0 min-w-0 focus:border-[#f0a144]"
                                           />
                                         </div>
                                       </div>
@@ -1611,14 +1764,14 @@ export default function App() {
                               );
                             })()}
 
-                            {/* --- SECCIÓN: DISTRIBUCIÓN Y ARRAY (BLENDER STYLE) --- */}
+                            {/* Distribución y copias */}
                             <div className="mt-4 pt-3 border-t border-[#2a2a2a]/80 space-y-2.5">
-                              <div className="flex items-center justify-between border-b border-[#2a2a2a]/40 pb-1 text-[8px] font-bold text-[#888888]">
+                              <div className="flex items-center justify-between border-b border-[#2a2a2a]/40 pb-1 text-[11px] font-bold text-[#888888]">
                                 <span className="flex items-center gap-1 text-[#f0a144]">
                                   <Combine className="w-3.5 h-3.5 text-[#f0a144]" />
-                                  <span>▼ DISTRIBUCIÓN Y ARRAY</span>
+                                  <span>▼ DISTRIBUIR Y REPETIR</span>
                                 </span>
-                                <span className="text-[#64748b] text-[6px] tracking-wider font-mono">MODIFICADOR</span>
+                                <span className="text-[#64748b] text-[11px] tracking-wider font-mono">MONTAJE</span>
                               </div>
 
                               {/* Toggle Mode */}
@@ -1626,33 +1779,33 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => setArrayMode('between')}
-                                  className={`flex-1 py-1 rounded text-[8px] font-bold transition-all ${arrayMode === 'between' ? 'bg-[#565656] text-white shadow-sm' : 'hover:bg-[#222] text-[#888]'}`}
+                                  className={`flex-1 py-1 rounded text-[11px] font-bold transition-all ${arrayMode === 'between' ? 'bg-[#565656] text-white shadow-sm' : 'hover:bg-[#222] text-[#888]'}`}
                                 >
                                   Entre 2 Piezas
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => setArrayMode('offset')}
-                                  className={`flex-1 py-1 rounded text-[8px] font-bold transition-all ${arrayMode === 'offset' ? 'bg-[#565656] text-white shadow-sm' : 'hover:bg-[#222] text-[#888]'}`}
+                                  className={`flex-1 py-1 rounded text-[11px] font-bold transition-all ${arrayMode === 'offset' ? 'bg-[#565656] text-white shadow-sm' : 'hover:bg-[#222] text-[#888]'}`}
                                 >
-                                  Blender Array
+                                  Copias por paso
                                 </button>
                               </div>
 
                               {arrayMode === 'between' ? (
                                 <div className="space-y-2 animate-in fade-in duration-100">
                                   {selectedPieceIds.length < 2 ? (
-                                    <p className="text-[7.5px] leading-snug text-amber-400 bg-amber-500/5 p-2 rounded border border-amber-500/15 italic">
+                                    <p className="text-[13px] leading-snug text-amber-400 bg-amber-500/5 p-2 rounded border border-amber-500/15 italic">
                                       ⚠️ Selecciona exactamente 2 piezas (mantén pulsado Shift o activa Multiselección) para distribuir las repisas intermedias entre ellas.
                                     </p>
                                   ) : (
                                     <>
-                                      <p className="text-[7.5px] text-[#999] leading-snug italic bg-[#151515] p-1.5 rounded border border-[#222]">
+                                      <p className="text-[13px] text-[#999] leading-snug italic bg-[#151515] p-1.5 rounded border border-[#222]">
                                         Distribuye las repisas de manera equidistante entre las dos piezas seleccionadas en cualquier posición (3D automático).
                                       </p>
                                       
                                       <div className="grid grid-cols-3 items-center gap-1.5">
-                                        <span className="text-[7.5px] font-bold text-[#888] uppercase text-right">Repisas</span>
+                                        <span className="text-[13px] font-bold text-[#888] uppercase text-right">Repisas</span>
                                         <div className="col-span-2 flex items-center gap-2">
                                           <input 
                                             type="number" 
@@ -1660,9 +1813,9 @@ export default function App() {
                                             max="20"
                                             value={arrayCount}
                                             onChange={(e) => setArrayCount(Math.max(1, parseInt(e.target.value) || 1))}
-                                            className="w-12 bg-[#111111] border border-[#333] rounded px-1.5 py-0.5 text-white text-[9px] outline-none text-center focus:border-[#f0a144] font-mono"
+                                            className="w-12 bg-[#111111] border border-[#333] rounded px-1.5 py-0.5 text-white text-[12px] outline-none text-center focus:border-[#f0a144] font-mono"
                                           />
-                                          <span className="text-[7.5px] text-[#666] font-mono">
+                                          <span className="text-[13px] text-[#666] font-mono">
                                             ({arrayCount + 1} divisiones)
                                           </span>
                                         </div>
@@ -1671,7 +1824,7 @@ export default function App() {
                                       <button
                                         type="button"
                                         onClick={executeDistribution}
-                                        className="w-full py-1.5 rounded bg-[#f0a144] hover:bg-[#e09134] text-black text-[9px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1"
+                                        className="w-full py-1.5 rounded bg-[#f0a144] hover:bg-[#e09134] text-black text-[12px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1"
                                       >
                                         <Combine className="w-3 h-3 text-black" />
                                         Distribuir Repisas
@@ -1681,17 +1834,17 @@ export default function App() {
                                 </div>
                               ) : (
                                 <div className="space-y-2 animate-in fade-in duration-100">
-                                  <p className="text-[7.5px] text-[#999] leading-snug italic bg-[#151515] p-1.5 rounded border border-[#222]">
-                                    Duplica las piezas seleccionadas aplicando un desplazamiento relativo en el eje seleccionado, tal como en Blender.
+                                  <p className="text-[13px] text-[#999] leading-snug italic bg-[#151515] p-1.5 rounded border border-[#222]">
+                                    Duplica las piezas seleccionadas con una separación constante en el eje elegido.
                                   </p>
 
                                   {/* Axis Selector */}
                                   <div className="grid grid-cols-3 items-center gap-1.5">
-                                    <span className="text-[7.5px] font-bold text-[#888] uppercase text-right">Eje</span>
+                                    <span className="text-[13px] font-bold text-[#888] uppercase text-right">Eje</span>
                                     <select 
                                       value={arrayAxis}
                                       onChange={(e) => setArrayAxis(e.target.value as any)}
-                                      className="col-span-2 bg-[#111111] border border-[#333] rounded px-1.5 py-0.5 text-white text-[9px] outline-none cursor-pointer focus:border-[#f0a144]"
+                                      className="col-span-2 bg-[#111111] border border-[#333] rounded px-1.5 py-0.5 text-white text-[12px] outline-none cursor-pointer focus:border-[#f0a144]"
                                     >
                                       <option value="Y">Eje Y (Espesor / Altura)</option>
                                       <option value="Z">Eje Z (Ancho / Profundidad)</option>
@@ -1701,7 +1854,7 @@ export default function App() {
 
                                   {/* Count Slider */}
                                   <div className="grid grid-cols-3 items-center gap-1.5">
-                                    <span className="text-[7.5px] font-bold text-[#888] uppercase text-right">Cantidad</span>
+                                    <span className="text-[13px] font-bold text-[#888] uppercase text-right">Cantidad</span>
                                     <div className="col-span-2 flex items-center gap-1.5">
                                       <input 
                                         type="range" 
@@ -1712,13 +1865,13 @@ export default function App() {
                                         onChange={(e) => setArrayCount(parseInt(e.target.value))}
                                         className="flex-1 h-1 bg-[#2e2e2e] rounded-lg cursor-pointer appearance-none accent-[#f0a144]"
                                       />
-                                      <span className="text-[7.5px] font-mono text-[#888] w-6 text-right">{arrayCount}</span>
+                                      <span className="text-[13px] font-mono text-[#888] w-6 text-right">{arrayCount}</span>
                                     </div>
                                   </div>
 
                                   {/* Relative Offset Slider */}
                                   <div className="grid grid-cols-3 items-center gap-1.5">
-                                    <span className="text-[7.5px] font-bold text-[#888] uppercase text-right">Offset Rel.</span>
+                                    <span className="text-[13px] font-bold text-[#888] uppercase text-right">Offset Rel.</span>
                                     <div className="col-span-2 flex items-center gap-1.5">
                                       <input 
                                         type="range" 
@@ -1729,17 +1882,17 @@ export default function App() {
                                         onChange={(e) => setArrayOffset(parseFloat(e.target.value))}
                                         className="flex-1 h-1 bg-[#2e2e2e] rounded-lg cursor-pointer appearance-none accent-[#f0a144]"
                                       />
-                                      <span className="text-[7.5px] font-mono text-[#888] w-8 text-right">{arrayOffset.toFixed(2)}x</span>
+                                      <span className="text-[13px] font-mono text-[#888] w-8 text-right">{arrayOffset.toFixed(2)}x</span>
                                     </div>
                                   </div>
 
                                   <button
                                     type="button"
                                     onClick={executeDistribution}
-                                    className="w-full py-1.5 rounded bg-[#3b82f6] hover:bg-[#2563eb] text-white text-[9px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1"
+                                    className="w-full py-1.5 rounded bg-[#3b82f6] hover:bg-[#2563eb] text-white text-[12px] font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1"
                                   >
                                     <Plus className="w-3 h-3 text-white" />
-                                    Aplicar Array
+                                    Crear copias
                                   </button>
                                 </div>
                               )}
@@ -1748,7 +1901,7 @@ export default function App() {
                         );
                       })()
                     ) : (
-                      <div className="text-center text-[9px] text-[#666] py-3 italic">
+                      <div className="text-center text-[12px] text-[#666] py-3 italic">
                         Selecciona una pieza para ver procesos y cantos
                       </div>
                     )}
@@ -1756,44 +1909,44 @@ export default function App() {
                 )}
               </div>
 
-              {/* TRAY 5: COMPONENTES DINÁMICOS (SKETCHUP) */}
+              {/* Puertas y cajones interactivos */}
               <div className="flex flex-col">
                 <div 
                   onClick={() => toggleTray('dinamico')}
                   className="h-7 bg-[#262626] hover:bg-[#2d2d2d] flex items-center justify-between px-2 cursor-pointer select-none transition-colors border-t border-[#3c3c3c]/30 border-b border-[#151515]"
                 >
-                  <div className="flex items-center gap-1.5 text-[9px] font-bold text-[#dddddd] uppercase tracking-wider">
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-[#dddddd] uppercase tracking-wider">
                     {trayOpen.dinamico ? (
                       <ChevronDown className="w-3.5 h-3.5 text-purple-400" />
                     ) : (
                       <ChevronRight className="w-3.5 h-3.5 text-[#888888]" />
                     )}
-                    <span className="text-purple-300">Componentes dinámicos</span>
+                    <span className="text-purple-300">Puertas y cajones</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <span className="text-[7.5px] font-mono text-purple-400 font-bold bg-purple-950/40 px-1 py-0.5 rounded border border-purple-500/30">SKETCHUP</span>
+                    <span className="text-[13px] font-mono text-purple-400 font-bold bg-purple-950/40 px-1 py-0.5 rounded border border-purple-500/30">MOVIMIENTO</span>
                   </div>
                 </div>
 
                 {trayOpen.dinamico && (
-                  <div className="bg-[#1e1e1e] p-3 text-[10px] text-[#ccc] space-y-2.5 animate-in fade-in duration-100">
+                  <div className="bg-[#1e1e1e] p-3 text-[12px] text-[#ccc] space-y-2.5 animate-in fade-in duration-100">
                     {/* Global Actions */}
                     <div className="flex items-center gap-1.5 bg-purple-950/30 p-1.5 rounded border border-purple-500/20">
                       <button
                         type="button"
                         onClick={() => handleToggleAllDynamicPieces()}
-                        className="flex-1 bg-purple-900/80 hover:bg-purple-800 text-purple-100 py-1 rounded text-[9px] font-bold flex items-center justify-center gap-1 transition-all shadow active:scale-95 cursor-pointer"
+                        className="flex-1 bg-purple-900/80 hover:bg-purple-800 text-purple-100 py-1 rounded text-[12px] font-bold flex items-center justify-center gap-1 transition-all shadow active:scale-95 cursor-pointer"
                       >
                         <Play className="w-2.5 h-2.5 fill-current" />
-                        <span>Probar Animación Mueble</span>
+                        <span>Probar mueble</span>
                       </button>
                       <button
                         type="button"
                         onClick={handleAutoTagDynamicPieces}
-                        className="px-2 py-1 bg-[#2d2d2d] hover:bg-[#3d3d3d] text-purple-300 rounded text-[8px] font-bold transition-colors border border-[#3c3c3c] cursor-pointer"
+                        className="px-2 py-1 bg-[#2d2d2d] hover:bg-[#3d3d3d] text-purple-300 rounded text-[11px] font-bold transition-colors border border-[#3c3c3c] cursor-pointer"
                         title="Auto-Detectar componentes basándose en nombres (Puertas / Cajones)"
                       >
-                        ⚡ Auto-Etiquetar
+                        Detectar por nombre
                       </button>
                     </div>
 
@@ -1806,8 +1959,8 @@ export default function App() {
                         return (
                           <div className="space-y-2 pt-1 border-t border-[#2a2a2a]">
                             <div className="flex flex-col gap-1">
-                              <label className="text-[7.5px] font-bold text-purple-400 uppercase tracking-wider">
-                                Comportamiento del Componente
+                              <label className="text-[13px] font-bold text-purple-400 uppercase tracking-wider">
+                                Movimiento de la pieza
                               </label>
                               <select
                                 value={dyn ? (dyn.type === 'door' ? (dyn.doorType || 'single_left') : 'drawer') : 'none'}
@@ -1839,7 +1992,7 @@ export default function App() {
                                     });
                                   }
                                 }}
-                                className="bg-[#111111] border border-purple-500/40 text-purple-200 text-[9.5px] font-bold px-2 py-1 rounded outline-none w-full focus:border-purple-400 cursor-pointer"
+                                className="bg-[#111111] border border-purple-500/40 text-purple-200 text-[12px] font-bold px-2 py-1 rounded outline-none w-full focus:border-purple-400 cursor-pointer"
                               >
                                 <option value="none">⚪ Estático (Pieza Fija)</option>
                                 <option value="single_left">🚪 Puerta Batiente Izquierda (Bisagra Izq)</option>
@@ -1852,13 +2005,13 @@ export default function App() {
                             {dyn && (
                               <div className="bg-[#141414] border border-purple-500/30 p-2 rounded space-y-2">
                                 <div className="flex items-center justify-between">
-                                  <span className="text-[8px] font-black text-purple-300 uppercase">
+                                  <span className="text-[11px] font-black text-purple-300 uppercase">
                                     Estado Actual: <span className={dyn.isOpen ? 'text-green-400 font-bold' : 'text-gray-400'}>{dyn.isOpen ? 'ABIERTO' : 'CERRADO'}</span>
                                   </span>
                                   <button
                                     type="button"
                                     onClick={() => handleToggleDynamicPiece(activePiece.id)}
-                                    className={`px-2.5 py-1 rounded text-[8.5px] font-bold transition-all shadow cursor-pointer ${
+                                    className={`px-2.5 py-1 rounded text-[13px] font-bold transition-all shadow cursor-pointer ${
                                       dyn.isOpen 
                                         ? 'bg-amber-600/80 hover:bg-amber-500 text-white' 
                                         : 'bg-purple-700/80 hover:bg-purple-600 text-white'
@@ -1870,7 +2023,7 @@ export default function App() {
 
                                 {dyn.type === 'door' ? (
                                   <div className="flex flex-col gap-1">
-                                    <div className="flex justify-between items-center text-[7.5px] font-bold text-[#888]">
+                                    <div className="flex justify-between items-center text-[13px] font-bold text-[#888]">
                                       <span>ÁNGULO MÁXIMO DE APERTURA:</span>
                                       <span className="text-purple-300 font-mono">{dyn.openAngle ?? 95}°</span>
                                     </div>
@@ -1891,7 +2044,7 @@ export default function App() {
                                   </div>
                                 ) : (
                                   <div className="flex flex-col gap-1">
-                                    <div className="flex justify-between items-center text-[7.5px] font-bold text-[#888]">
+                                    <div className="flex justify-between items-center text-[13px] font-bold text-[#888]">
                                       <span>DISTANCIA DE APERTURA (RIEL):</span>
                                       <span className="text-purple-300 font-mono">{dyn.slideDistance ?? 350} mm</span>
                                     </div>
@@ -1904,7 +2057,7 @@ export default function App() {
                                           dynamic: { ...dyn, slideDistance: dist }
                                         });
                                       }}
-                                      className="bg-[#1e1e1e] border border-[#333] text-[9px] font-mono text-center text-white py-0.5 rounded outline-none w-full focus:border-purple-400"
+                                      className="bg-[#1e1e1e] border border-[#333] text-[12px] font-mono text-center text-white py-0.5 rounded outline-none w-full focus:border-purple-400"
                                     />
                                   </div>
                                 )}
@@ -1914,7 +2067,7 @@ export default function App() {
                         );
                       })()
                     ) : (
-                      <div className="text-center text-[9px] text-[#666] py-2 italic">
+                      <div className="text-center text-[12px] text-[#666] py-2 italic">
                         Selecciona una pieza para asignarle atributos de Puerta o Cajón Dinámico
                       </div>
                     )}
@@ -1927,6 +2080,107 @@ export default function App() {
         ) : null}
       </div>
 
+      {notice && (
+        <div className="fixed top-[116px] md:top-[72px] left-1/2 -translate-x-1/2 z-[70] cad-toast" role="status">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{notice}</span>
+        </div>
+      )}
+
+      {isProcessing && (
+        <div className="fixed inset-0 z-[65] bg-black/55 backdrop-blur-sm flex items-center justify-center p-5" role="status" aria-live="polite">
+          <div className="cad-modal p-6 flex items-center gap-4 max-w-sm w-full">
+            <Loader2 className="w-7 h-7 text-[#f0a144] animate-spin shrink-0" />
+            <div>
+              <div className="font-bold text-white">Analizando la imagen</div>
+              <div className="text-sm text-[#9aa5b1] mt-1">Tu proyecto actual se mantiene hasta terminar.</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {newPieceDialogOpen && (
+        <div className="fixed inset-0 bg-black/65 z-[60] flex items-center justify-center p-3 sm:p-5 backdrop-blur-sm" role="presentation" onMouseDown={() => setNewPieceDialogOpen(false)}>
+          <form
+            className="cad-modal w-full max-w-xl max-h-[92dvh] overflow-y-auto"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-piece-title"
+            onMouseDown={(event) => event.stopPropagation()}
+            onSubmit={(event) => {
+              event.preventDefault();
+              createPieceFromDraft();
+            }}
+          >
+            <div className="flex items-start justify-between gap-4 p-5 border-b border-[#303842]">
+              <div>
+                <div className="flex items-center gap-2 text-[#f0a144] text-xs font-bold uppercase tracking-wider mb-1"><Plus className="w-4 h-4" /> Nueva pieza</div>
+                <h2 id="new-piece-title" className="text-xl font-extrabold text-white">Define el tablero en milímetros</h2>
+                <p className="text-sm text-[#9aa5b1] mt-1">Podrás moverlo, girarlo y editar sus cantos después.</p>
+              </div>
+              <button type="button" className="cad-icon-button" onClick={() => setNewPieceDialogOpen(false)} aria-label="Cerrar">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-5">
+              <label className="cad-field">
+                <span>Nombre</span>
+                <input autoFocus value={pieceDraft.name} onChange={(event) => setPieceDraft(draft => ({ ...draft, name: event.target.value }))} placeholder="Ej. Lateral izquierdo" />
+              </label>
+
+              <div>
+                <div className="cad-field-label">Medidas de corte</div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <MeasurementInput label="Largo" value={pieceDraft.largo} onChange={(value) => setPieceDraft(draft => ({ ...draft, largo: value }))} min={10} />
+                  <MeasurementInput label="Ancho" value={pieceDraft.ancho} onChange={(value) => setPieceDraft(draft => ({ ...draft, ancho: value }))} min={10} />
+                  <MeasurementInput label="Espesor" value={pieceDraft.espesor} onChange={(value) => setPieceDraft(draft => ({ ...draft, espesor: value }))} min={1} />
+                  <MeasurementInput label="Cantidad" value={pieceDraft.cantidad} onChange={(value) => setPieceDraft(draft => ({ ...draft, cantidad: value }))} min={1} unit="u." />
+                </div>
+              </div>
+
+              <div>
+                <div className="cad-field-label">Cómo colocarla al crear</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    ['horizontal', 'Horizontal', 'Base o repisa'],
+                    ['lateral', 'Vertical', 'Lateral'],
+                    ['frente', 'Frontal', 'Puerta o respaldo'],
+                  ] as [PieceOrientation, string, string][]).map(([value, label, help]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`cad-orientation-button ${pieceDraft.orientation === value ? 'is-active' : ''}`}
+                      onClick={() => setPieceDraft(draft => ({ ...draft, orientation: value }))}
+                    >
+                      <span className={`piece-orientation ${value}`} />
+                      <strong>{label}</strong>
+                      <small>{help}</small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <label className="cad-field">
+                <span>Material</span>
+                <select value={pieceDraft.material} onChange={(event) => setPieceDraft(draft => ({ ...draft, material: event.target.value }))}>
+                  {Object.entries(getGroupedMaterials()).map(([brand, items]) => (
+                    <optgroup key={brand} label={brand}>
+                      {items.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="p-4 sm:p-5 bg-[#15191e] border-t border-[#303842] flex flex-col-reverse sm:flex-row justify-end gap-2">
+              <button type="button" className="cad-secondary-button justify-center" onClick={() => setNewPieceDialogOpen(false)}>Cancelar</button>
+              <button type="submit" className="cad-primary-button justify-center"><Plus className="w-4 h-4" /> Crear y seleccionar pieza</button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Delete Confirmation Modal */}
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-[2px]">
@@ -1935,22 +2189,22 @@ export default function App() {
               <Trash2 className="w-5 h-5" />
             </div>
             <h3 className="text-white font-bold text-sm mb-2 text-center text-balance">¿Confirmar Eliminación?</h3>
-            <p className="text-[#999] text-[11px] mb-6 text-center text-balance leading-relaxed">
-              {deleteConfirm.type === 'all' && 'Se eliminarán TODAS las piezas y grupos de la escena. Esta acción no se puede deshacer.'}
-              {deleteConfirm.type === 'selected' && `Se eliminarán las ${selectedPieceIds.length} piezas seleccionadas. Esta acción no se puede deshacer.`}
+            <p className="text-[#999] text-[13px] mb-6 text-center text-balance leading-relaxed">
+              {deleteConfirm.type === 'all' && 'Se eliminarán todas las piezas y grupos del proyecto. Podrás recuperarlos con Deshacer.'}
+              {deleteConfirm.type === 'selected' && `Se eliminarán las ${selectedPieceIds.length} piezas seleccionadas. Podrás recuperarlas con Deshacer.`}
               {deleteConfirm.type === 'group' && `Se eliminará el grupo "${deleteConfirm.name}" y sus piezas separadas.`}
               {deleteConfirm.type === 'piece' && `Se eliminará la pieza "${deleteConfirm.name}".`}
             </p>
             <div className="flex w-full gap-2">
               <button 
                 onClick={() => setDeleteConfirm(null)}
-                className="flex-1 py-1.5 rounded border border-[#333] hover:bg-[#333] text-[#ccc] text-[10px] font-bold uppercase tracking-widest transition-colors"
+                className="flex-1 py-1.5 rounded border border-[#333] hover:bg-[#333] text-[#ccc] text-[12px] font-bold uppercase tracking-widest transition-colors"
               >
                 Cancelar
               </button>
               <button 
                 onClick={executeDelete}
-                className="flex-1 py-1.5 rounded bg-red-500/80 hover:bg-red-500 text-white text-[10px] font-bold uppercase tracking-widest transition-colors"
+                className="flex-1 py-1.5 rounded bg-red-500/80 hover:bg-red-500 text-white text-[12px] font-bold uppercase tracking-widest transition-colors"
               >
                 Borrar
               </button>
@@ -1970,8 +2224,8 @@ export default function App() {
                   <Lightbulb className="w-4 h-4 text-pink-400" />
                 </div>
                 <div>
-                  <h3 className="text-white font-bold text-sm">Guía Didáctica: Materiales y Fabricación</h3>
-                  <p className="text-[#888] text-[9px] uppercase tracking-wider font-mono">Física PBR en Carpintería Real</p>
+                  <h3 className="text-white font-bold text-sm">Guía práctica de materiales y fabricación</h3>
+                  <p className="text-[#888] text-[12px] uppercase tracking-wider font-mono">Decisiones reales de taller</p>
                 </div>
               </div>
               <button 
@@ -1984,27 +2238,27 @@ export default function App() {
             </div>
 
             {/* Scrollable content */}
-            <div className="p-5 overflow-y-auto space-y-5 text-[11px] leading-relaxed text-gray-300">
+            <div className="p-5 overflow-y-auto space-y-5 text-[13px] leading-relaxed text-gray-300">
               
               {/* Concept 1 */}
               <div className="space-y-1.5">
                 <h4 className="font-bold text-white flex items-center gap-1.5 text-xs text-pink-400">
                   <span className="w-1.5 h-1.5 rounded-full bg-pink-400" />
-                  1. Roughness (Rugosidad) en Melaminas
+                  1. Textura y brillo de la melamina
                 </h4>
                 <p>
-                  En motores gráficos modernos (como Cycles / EEVEE en Blender) y aserraderos industriales reales, la rugosidad física determina cómo se dispersa la luz al tocar el tablero:
+                  La textura visual ayuda a representar cómo refleja la luz cada tablero y a comunicar mejor el acabado al cliente:
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
                   <div className="bg-[#141414] p-2 rounded border border-[#2b2b2b]">
-                    <span className="text-pink-300 font-bold block text-[10px] uppercase">Brillo Alto / High Gloss (Roughness &lt; 0.15)</span>
+                    <span className="text-pink-300 font-bold block text-[12px] uppercase">Alto brillo</span>
                     Espejado y sumamente elegante. Usado en cocinas de lujo y frentes de armarios modernos. 
-                    <span className="text-amber-500/90 text-[10px] font-bold block mt-1">⚠️ Desventaja:</span> Es propenso a rayaduras de lija y marcas de huellas cotidianas.
+                    <span className="text-amber-500/90 text-[12px] font-bold block mt-1">⚠️ Desventaja:</span> Es propenso a rayaduras de lija y marcas de huellas cotidianas.
                   </div>
                   <div className="bg-[#141414] p-2 rounded border border-[#2b2b2b]">
-                    <span className="text-emerald-400 font-bold block text-[10px] uppercase">Satinado Estándar (Roughness 0.35 - 0.50)</span>
+                    <span className="text-emerald-400 font-bold block text-[12px] uppercase">Satinado estándar</span>
                     La textura rugosa media es la reina de las melaminas. Imita la textura de la madera natural y los acabados lacados suaves.
-                    <span className="text-emerald-500 text-[10px] font-bold block mt-1">✓ Ventaja:</span> Oculta rayones y manchas de grasa diaria de manera óptima.
+                    <span className="text-emerald-500 text-[12px] font-bold block mt-1">✓ Ventaja:</span> Oculta rayones y manchas de grasa diaria de manera óptima.
                   </div>
                 </div>
               </div>
@@ -2016,15 +2270,15 @@ export default function App() {
                   2. La Ley Física de los Cantos (Tapajuntas)
                 </h4>
                 <p>
-                  Cuando cortas una placa de melamina estándar en una escuadradora o CNC, dejas expuesto el **Núcleo del Tablero** (hecho de aglomerado de virutas de pino o fibras de madera MDF prensada).
+                  Cuando cortas una placa de melamina queda expuesto el núcleo del tablero. Los cantos protegen ese borde y definen el acabado final.
                 </p>
-                <div className="bg-amber-500/10 border border-amber-500/20 p-2.5 rounded-lg text-amber-400 text-[10px] flex items-start gap-2.5">
+                <div className="bg-amber-500/10 border border-amber-500/20 p-2.5 rounded-lg text-amber-400 text-[12px] flex items-start gap-2.5">
                   <span className="text-base leading-none">⚠️</span>
                   <div>
                     <strong>Peligro de Humedad:</strong> Un borde descubierto ("Ninguno / Visto" en el visor propiedades) expone la madera interna. Si entra en contacto con agua (como trapear el piso, vapores de cocinas o baños), el aserrín absorberá la humedad, hinchándose e inutilizando el mueble de modo definitivo.
                   </div>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2 font-mono text-[9.5px]">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2 font-mono text-[12px]">
                   <div className="bg-[#181818] p-2 rounded border border-[#252525]">
                     <span className="text-blue-400 font-bold">● Canto Delgado (0.4mm - 0.5mm):</span> Estética limpia y económica. Perfecto para laterales de cajoneras y estantería de guardado interior.
                   </div>
@@ -2048,7 +2302,7 @@ export default function App() {
               {/* Tips for Best Usage */}
               <div className="bg-pink-900/10 border border-pink-500/20 p-3 rounded-xl space-y-1 text-pink-300">
                 <h5 className="font-bold text-xs">🎓 Práctica recomendada para estudiantes y diseñadores:</h5>
-                <ul className="list-disc list-inside space-y-1 pl-1 text-[10px] leading-relaxed">
+                <ul className="list-disc list-inside space-y-1 pl-1 text-[12px] leading-relaxed">
                   <li>Antes de mandar a fabricar las piezas, repasa el despiece de los cantos para asegurar que no queden orillas descubiertas que se puedan inundar.</li>
                   <li>Intenta agrupar las piezas por materiales personalizados usando el mismo color hexadecimal para que el optimizador de corte genere placas homogéneas.</li>
                 </ul>
@@ -2060,7 +2314,7 @@ export default function App() {
               <button 
                 type="button"
                 onClick={() => setDidacticGuideOpen(false)}
-                className="bg-pink-600 hover:bg-pink-500 text-white font-bold text-[10px] py-1.5 px-4 rounded-lg uppercase tracking-wider select-none transition-all"
+                className="bg-pink-600 hover:bg-pink-500 text-white font-bold text-[12px] py-1.5 px-4 rounded-lg uppercase tracking-wider select-none transition-all"
               >
                 Entendido
               </button>
@@ -2120,6 +2374,7 @@ export default function App() {
           });
 
           setEditingDimensionsPieceId(null);
+          showNotice('Medidas actualizadas y posición conservada');
         };
 
         return (
@@ -2145,7 +2400,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setEditingAxis('largo')}
-                  className={`flex-1 py-1.5 px-2 rounded-lg text-[10.5px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-[12px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                     editingAxis === 'largo'
                       ? 'bg-red-500/20 text-red-400 border border-red-500/50 shadow-md'
                       : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c] border border-transparent'
@@ -2158,7 +2413,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setEditingAxis('ancho')}
-                  className={`flex-1 py-1.5 px-2 rounded-lg text-[10.5px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-[12px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                     editingAxis === 'ancho'
                       ? 'bg-blue-500/20 text-blue-400 border border-blue-500/50 shadow-md'
                       : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c] border border-transparent'
@@ -2171,7 +2426,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setEditingAxis('espesor')}
-                  className={`flex-1 py-1.5 px-2 rounded-lg text-[10.5px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-[12px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                     editingAxis === 'espesor'
                       ? 'bg-green-500/20 text-green-400 border border-green-500/50 shadow-md'
                       : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c] border border-transparent'
@@ -2187,10 +2442,10 @@ export default function App() {
                 {/* Piece Title Banner */}
                 <div className="bg-[#141414] p-3 rounded-xl border border-[#2b2b2b] flex items-center justify-between">
                   <div className="flex flex-col">
-                    <span className="text-[8px] font-black uppercase text-[#888]">Pieza Activa</span>
-                    <span className="text-[11px] font-bold text-white uppercase truncate max-w-[200px]">{p.name || 'Nueva Pieza'}</span>
+                    <span className="text-[11px] font-black uppercase text-[#888]">Pieza Activa</span>
+                    <span className="text-[13px] font-bold text-white uppercase truncate max-w-[200px]">{p.name || 'Nueva Pieza'}</span>
                   </div>
-                  <span className="text-[10px] font-mono font-bold text-[#f0a144] bg-[#f0a144]/10 border border-[#f0a144]/20 px-2.5 py-1 rounded-lg">
+                  <span className="text-[12px] font-mono font-bold text-[#f0a144] bg-[#f0a144]/10 border border-[#f0a144]/20 px-2.5 py-1 rounded-lg">
                     {tempLargo} x {tempAncho} x {tempEspesor} mm
                   </span>
                 </div>
@@ -2203,7 +2458,7 @@ export default function App() {
                         <span className="text-xs font-black uppercase tracking-wider text-red-400 flex items-center gap-1.5">
                           <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" /> Modificar Largo (X)
                         </span>
-                        <span className="text-[9px] font-mono text-gray-400">Dimensión X</span>
+                        <span className="text-[12px] font-mono text-gray-400">Dimensión X</span>
                       </div>
 
                       {/* Number input and increment buttons */}
@@ -2230,7 +2485,7 @@ export default function App() {
                             onChange={(e) => setTempLargo(parseInt(e.target.value) || 0)}
                             className="w-full bg-[#0d0d0d] border-2 border-red-500/60 focus:border-red-400 text-white text-base font-mono font-black text-center py-1.5 rounded-lg outline-none transition-colors"
                           />
-                          <span className="absolute right-2 top-2.5 text-[9px] font-bold text-gray-500 select-none">mm</span>
+                          <span className="absolute right-2 top-2.5 text-[12px] font-bold text-gray-500 select-none">mm</span>
                         </div>
 
                         <button 
@@ -2256,7 +2511,7 @@ export default function App() {
                             key={`largo-${val}`}
                             type="button"
                             onClick={() => setTempLargo(val)}
-                            className={`text-[9px] font-mono font-bold px-2 py-1 rounded-lg border transition-all cursor-pointer ${
+                            className={`text-[12px] font-mono font-bold px-2 py-1 rounded-lg border transition-all cursor-pointer ${
                               tempLargo === val 
                                 ? 'bg-red-500 text-white border-red-400 font-black shadow' 
                                 : 'bg-[#181818] border-[#2e2e2e] hover:border-red-500/50 text-gray-400 hover:text-white'
@@ -2270,9 +2525,9 @@ export default function App() {
 
                     {/* Anchoring / Direction Controls */}
                     <div className="bg-[#141414] border border-[#2b2b2b] p-3 rounded-xl space-y-2">
-                      <span className="text-[10px] font-black uppercase tracking-wider text-gray-300 flex items-center justify-between">
+                      <span className="text-[12px] font-black uppercase tracking-wider text-gray-300 flex items-center justify-between">
                         <span>Lado Anclado / Dirección de Crecimiento</span>
-                        <span className="text-[8px] font-normal text-gray-500">(Fija un extremo)</span>
+                        <span className="text-[11px] font-normal text-gray-500">(Fija un extremo)</span>
                       </span>
 
                       <div className="grid grid-cols-3 gap-1.5 pt-1">
@@ -2286,7 +2541,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">⬅ Izquierda</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Izq (-X)<br/>Crece a Der (+X)</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Izq (-X)<br/>Crece a Der (+X)</span>
                         </button>
 
                         <button
@@ -2299,7 +2554,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">↔ Centro</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Centro<br/>Crece en Ambos</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Centro<br/>Crece en Ambos</span>
                         </button>
 
                         <button
@@ -2312,7 +2567,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">Derecha ➔</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Der (+X)<br/>Crece a Izq (-X)</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Der (+X)<br/>Crece a Izq (-X)</span>
                         </button>
                       </div>
                     </div>
@@ -2327,7 +2582,7 @@ export default function App() {
                         <span className="text-xs font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
                           <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" /> Modificar Ancho (Z)
                         </span>
-                        <span className="text-[9px] font-mono text-gray-400">Dimensión Z</span>
+                        <span className="text-[12px] font-mono text-gray-400">Dimensión Z</span>
                       </div>
 
                       {/* Number input and increment buttons */}
@@ -2354,7 +2609,7 @@ export default function App() {
                             onChange={(e) => setTempAncho(parseInt(e.target.value) || 0)}
                             className="w-full bg-[#0d0d0d] border-2 border-blue-500/60 focus:border-blue-400 text-white text-base font-mono font-black text-center py-1.5 rounded-lg outline-none transition-colors"
                           />
-                          <span className="absolute right-2 top-2.5 text-[9px] font-bold text-gray-500 select-none">mm</span>
+                          <span className="absolute right-2 top-2.5 text-[12px] font-bold text-gray-500 select-none">mm</span>
                         </div>
 
                         <button 
@@ -2380,7 +2635,7 @@ export default function App() {
                             key={`ancho-${val}`}
                             type="button"
                             onClick={() => setTempAncho(val)}
-                            className={`text-[9px] font-mono font-bold px-2 py-1 rounded-lg border transition-all cursor-pointer ${
+                            className={`text-[12px] font-mono font-bold px-2 py-1 rounded-lg border transition-all cursor-pointer ${
                               tempAncho === val 
                                 ? 'bg-blue-500 text-white border-blue-400 font-black shadow' 
                                 : 'bg-[#181818] border-[#2e2e2e] hover:border-blue-500/50 text-gray-400 hover:text-white'
@@ -2394,9 +2649,9 @@ export default function App() {
 
                     {/* Anchoring / Direction Controls */}
                     <div className="bg-[#141414] border border-[#2b2b2b] p-3 rounded-xl space-y-2">
-                      <span className="text-[10px] font-black uppercase tracking-wider text-gray-300 flex items-center justify-between">
+                      <span className="text-[12px] font-black uppercase tracking-wider text-gray-300 flex items-center justify-between">
                         <span>Lado Anclado / Dirección de Crecimiento</span>
-                        <span className="text-[8px] font-normal text-gray-500">(Fija un extremo)</span>
+                        <span className="text-[11px] font-normal text-gray-500">(Fija un extremo)</span>
                       </span>
 
                       <div className="grid grid-cols-3 gap-1.5 pt-1">
@@ -2410,7 +2665,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">⬆ Atrás</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Atrás (-Z)<br/>Crece Adelante</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Atrás (-Z)<br/>Crece Adelante</span>
                         </button>
 
                         <button
@@ -2423,7 +2678,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">↔ Centro</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Centro<br/>Crece en Ambos</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Centro<br/>Crece en Ambos</span>
                         </button>
 
                         <button
@@ -2436,7 +2691,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">Adelante ⬇</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Adelante (+Z)<br/>Crece Atrás</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Adelante (+Z)<br/>Crece Atrás</span>
                         </button>
                       </div>
                     </div>
@@ -2451,7 +2706,7 @@ export default function App() {
                         <span className="text-xs font-black uppercase tracking-wider text-green-400 flex items-center gap-1.5">
                           <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" /> Modificar Espesor (Y)
                         </span>
-                        <span className="text-[9px] font-mono text-gray-400">Dimensión Y</span>
+                        <span className="text-[12px] font-mono text-gray-400">Dimensión Y</span>
                       </div>
 
                       {/* Number input and increment buttons */}
@@ -2471,7 +2726,7 @@ export default function App() {
                             onChange={(e) => setTempEspesor(parseInt(e.target.value) || 0)}
                             className="w-full bg-[#0d0d0d] border-2 border-green-500/60 focus:border-green-400 text-white text-base font-mono font-black text-center py-1.5 rounded-lg outline-none transition-colors"
                           />
-                          <span className="absolute right-2 top-2.5 text-[9px] font-bold text-gray-500 select-none">mm</span>
+                          <span className="absolute right-2 top-2.5 text-[12px] font-bold text-gray-500 select-none">mm</span>
                         </div>
 
                         <button 
@@ -2490,7 +2745,7 @@ export default function App() {
                             key={`espesor-${val}`}
                             type="button"
                             onClick={() => setTempEspesor(val)}
-                            className={`text-[9px] font-mono font-bold px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
+                            className={`text-[12px] font-mono font-bold px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
                               tempEspesor === val 
                                 ? 'bg-green-500 text-white border-green-400 font-black shadow' 
                                 : 'bg-[#181818] border-[#2e2e2e] hover:border-green-500/50 text-gray-400 hover:text-white'
@@ -2504,9 +2759,9 @@ export default function App() {
 
                     {/* Anchoring / Direction Controls */}
                     <div className="bg-[#141414] border border-[#2b2b2b] p-3 rounded-xl space-y-2">
-                      <span className="text-[10px] font-black uppercase tracking-wider text-gray-300 flex items-center justify-between">
+                      <span className="text-[12px] font-black uppercase tracking-wider text-gray-300 flex items-center justify-between">
                         <span>Lado Anclado / Dirección de Crecimiento</span>
-                        <span className="text-[8px] font-normal text-gray-500">(Fija un extremo)</span>
+                        <span className="text-[11px] font-normal text-gray-500">(Fija un extremo)</span>
                       </span>
 
                       <div className="grid grid-cols-3 gap-1.5 pt-1">
@@ -2520,7 +2775,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">⬇ Abajo</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Abajo (-Y)<br/>Crece Arriba (+Y)</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Abajo (-Y)<br/>Crece Arriba (+Y)</span>
                         </button>
 
                         <button
@@ -2533,7 +2788,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">↔ Centro</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Centro<br/>Crece en Ambos</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Centro<br/>Crece en Ambos</span>
                         </button>
 
                         <button
@@ -2546,7 +2801,7 @@ export default function App() {
                           }`}
                         >
                           <span className="text-xs font-black">Arriba ⬆</span>
-                          <span className="text-[8px] leading-tight text-gray-400">Ancla Arriba (+Y)<br/>Crece Abajo (-Y)</span>
+                          <span className="text-[11px] leading-tight text-gray-400">Ancla Arriba (+Y)<br/>Crece Abajo (-Y)</span>
                         </button>
                       </div>
                     </div>
@@ -2559,14 +2814,14 @@ export default function App() {
                 <button 
                   type="button"
                   onClick={() => setEditingDimensionsPieceId(null)}
-                  className="bg-[#3a3a3a] hover:bg-[#4d4d4d] text-[#cccccc] font-bold text-[10px] py-2 px-4 rounded-xl uppercase tracking-wider select-none transition-all active:scale-95 cursor-pointer"
+                  className="bg-[#3a3a3a] hover:bg-[#4d4d4d] text-[#cccccc] font-bold text-[12px] py-2 px-4 rounded-xl uppercase tracking-wider select-none transition-all active:scale-95 cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button 
                   type="button"
                   onClick={applyDimensionChanges}
-                  className="bg-[#f0a144] hover:bg-[#f2b05e] text-[#111111] font-black text-[10.5px] py-2 px-5 rounded-xl uppercase tracking-wider select-none transition-all active:scale-95 shadow-lg shadow-[#f0a144]/15 cursor-pointer"
+                  className="bg-[#f0a144] hover:bg-[#f2b05e] text-[#111111] font-black text-[12px] py-2 px-5 rounded-xl uppercase tracking-wider select-none transition-all active:scale-95 shadow-lg shadow-[#f0a144]/15 cursor-pointer"
                 >
                   Aplicar Dimensión
                 </button>
@@ -2580,16 +2835,39 @@ export default function App() {
   );
 }
 
-// Blender Components
-function ToolbarIcon({ icon, active, onClick }: { icon: any, active?: boolean, onClick?: () => void }) {
+function ToolbarIcon({ icon, label, title, active, disabled, onClick }: { icon: any, label: string, title: string, active?: boolean, disabled?: boolean, onClick?: () => void }) {
   return (
     <button 
       type="button"
       onClick={onClick}
-      className={`p-2 rounded transition-colors ${active ? 'bg-[#565656] text-white' : 'text-[#888888] hover:bg-[#4d4d4d] hover:text-[#cccccc]'}`}
+      disabled={disabled}
+      title={title}
+      aria-label={title}
+      className={`cad-tool-button ${active ? 'is-active' : ''}`}
     >
-      {React.cloneElement(icon, { className: 'w-4 h-4' })}
+      {React.cloneElement(icon, { className: 'w-5 h-5' })}
+      <span>{label}</span>
     </button>
+  );
+}
+
+function MeasurementInput({ label, value, onChange, min, unit = 'mm' }: { label: string, value: number, onChange: (value: number) => void, min: number, unit?: string }) {
+  return (
+    <label className="cad-measurement-field">
+      <span>{label}</span>
+      <div>
+        <input
+          type="number"
+          inputMode="decimal"
+          min={min}
+          step="1"
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+          onFocus={(event) => event.currentTarget.select()}
+        />
+        <small>{unit}</small>
+      </div>
+    </label>
   );
 }
 
@@ -2598,6 +2876,7 @@ function PropertyField({ label, value, onChange, axis }: { label: string, value:
   const startX = useRef(0);
   const startValue = useRef(0);
   const axisColor = axis === 'x' ? 'bg-[#da3c3c]' : axis === 'y' ? 'bg-[#3cda3c]' : 'bg-[#3c3cda]';
+  const minimum = axis === 'y' ? 1 : 10;
 
   const handlePointerDown = (e: React.PointerEvent) => {
     // Only trigger if clicking the label/area, not the input itself if we want both
@@ -2612,7 +2891,7 @@ function PropertyField({ label, value, onChange, axis }: { label: string, value:
     if (!isDragging) return;
     const delta = e.clientX - startX.current;
     // Sensitivity: 1 unit per pixel? Maybe slower for precision
-    const newValue = Math.max(0, startValue.current + delta);
+    const newValue = Math.max(minimum, startValue.current + delta);
     onChange(newValue);
   };
 
@@ -2630,13 +2909,15 @@ function PropertyField({ label, value, onChange, axis }: { label: string, value:
       className={`flex items-center bg-[#1a1a1a] rounded overflow-hidden border border-[#333333] group focus-within:border-[#f0a144] cursor-ew-resize select-none ${isDragging ? 'border-[#f0a144]' : ''}`}
     >
       <div className={`w-1 self-stretch ${axisColor}`} />
-      <span className="text-[8px] text-[#666666] font-black w-20 px-2 uppercase truncate pointer-events-none">{label}</span>
+      <span className="text-[11px] text-[#666666] font-black w-20 px-2 uppercase truncate pointer-events-none">{label}</span>
       <input 
         type="number"
+        min={minimum}
+        step="1"
         value={value === 0 ? '' : Math.round(value)}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        onChange={(e) => onChange(Math.max(minimum, parseFloat(e.target.value) || minimum))}
         onPointerDown={(e) => e.stopPropagation()}
-        className="flex-1 bg-transparent text-[10px] text-[#cccccc] font-mono px-2 py-1 outline-none text-right cursor-text"
+        className="flex-1 bg-transparent text-[12px] text-[#cccccc] font-mono px-2 py-1 outline-none text-right cursor-text"
         onClick={(e) => e.stopPropagation()}
       />
     </div>

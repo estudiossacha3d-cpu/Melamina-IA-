@@ -236,7 +236,7 @@ export default function CutPlanViewer({
   const [pieceViewMode, setPieceViewMode] = useState<'table' | 'cards'>('cards');
   const [pieceSearch, setPieceSearch] = useState('');
   const [pieceListExpanded, setPieceListExpanded] = useState(false);
-  const [mobileTab, setMobileTab] = useState<'boards' | 'list' | 'both'>('both');
+  const [mobileTab, setMobileTab] = useState<'boards' | 'list' | 'both'>('boards');
 
   // Quantity to rotate map state per piece row
   const [rotateQtyMap, setRotateQtyMap] = useState<Record<string, number>>({});
@@ -301,7 +301,7 @@ export default function CutPlanViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   
-  const { boardGroups, totalStats } = useMemo(() => {
+  const { boardGroups, totalStats, unplacedPieces } = useMemo(() => {
     // A physical sheet can only contain one material/colour and one thickness.
     const sheetGroups: Record<string, Piece[]> = {};
     pieces.forEach(p => {
@@ -310,7 +310,7 @@ export default function CutPlanViewer({
       sheetGroups[key].push(p);
     });
 
-    const results: { thickness: number, material: string, boards: PackedBoard[], stats: any, config: SheetConfig }[] = [];
+    const results: { thickness: number, material: string, boards: PackedBoard[], stats: any, config: SheetConfig, unplaced: string[] }[] = [];
     let combinedAreaUsed = 0;
     let combinedTotalArea = 0;
     let combinedBoardsCount = 0;
@@ -332,7 +332,8 @@ export default function CutPlanViewer({
         material,
         boards: packed.boards,
         stats: packed.stats,
-        config: groupConfig
+        config: groupConfig,
+        unplaced: packed.unplaced,
       });
 
       combinedAreaUsed += packed.stats.areaUsed;
@@ -344,6 +345,7 @@ export default function CutPlanViewer({
 
     return { 
       boardGroups: results, 
+      unplacedPieces: results.flatMap(result => result.unplaced),
       totalStats: {
         efficiency,
         areaUsed: combinedAreaUsed,
@@ -562,8 +564,8 @@ export default function CutPlanViewer({
       <div className="absolute inset-0 bg-[#393939] flex items-center justify-center">
         <div className="text-center group">
           <Layers className="w-12 h-12 text-[#222222] mx-auto mb-4 group-hover:text-[#f0a144]/50 transition-colors" />
-          <p className="text-[#888888] font-mono text-sm uppercase tracking-widest">Plano de corte vacío</p>
-          <p className="text-[#666666] text-[10px] uppercase mt-2">Añade piezas en el panel lateral para optimizar</p>
+          <p className="text-[#d9e0e7] font-bold text-base">Todavía no hay piezas para cortar</p>
+          <p className="text-[#8e99a6] text-sm mt-2">Vuelve a Diseño 3D y crea una pieza o carga el módulo base.</p>
         </div>
       </div>
     );
@@ -578,28 +580,28 @@ export default function CutPlanViewer({
         <div className="flex items-center gap-2 sm:gap-4 overflow-x-auto no-scrollbar py-1 min-w-0">
           <div className="flex items-center gap-1.5 shrink-0">
             <Scissors className="w-4 h-4 text-[#f0a144]" />
-            <h2 className="text-[10px] sm:text-[11px] font-bold text-white uppercase tracking-widest hidden sm:block">Plano de Corte 2D</h2>
+            <h2 className="text-[12px] sm:text-[13px] font-bold text-white uppercase tracking-widest hidden sm:block">Optimización de corte</h2>
           </div>
           
           {/* Mobile Main Tab Switcher */}
           <div className="flex sm:hidden items-center bg-[#111111] border border-[#f0a144]/40 p-0.5 rounded-lg shrink-0 shadow-inner">
             <button
               onClick={() => setMobileTab('boards')}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[9px] font-bold uppercase transition-all ${mobileTab === 'boards' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase transition-all ${mobileTab === 'boards' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
             >
               <Scissors className="w-3 h-3" />
               <span>Planchas</span>
             </button>
             <button
               onClick={() => setMobileTab('list')}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[9px] font-bold uppercase transition-all ${mobileTab === 'list' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase transition-all ${mobileTab === 'list' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
             >
               <Layers3 className="w-3 h-3" />
               <span>Piezas</span>
             </button>
             <button
               onClick={() => setMobileTab('both')}
-              className={`flex items-center gap-1 px-1.5 py-1 rounded text-[9px] font-bold uppercase transition-all ${mobileTab === 'both' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
+              className={`flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-all ${mobileTab === 'both' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
               title="Ver Ambos en Pantalla Dividida"
             >
               <LayoutList className="w-3 h-3" />
@@ -612,7 +614,7 @@ export default function CutPlanViewer({
           <div className="hidden sm:flex items-center bg-[#181818] border border-[#333333] p-0.5 rounded-lg shrink-0">
             <button
               onClick={() => setLayoutMode('vertical')}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[9px] font-bold uppercase transition-colors ${layoutMode === 'vertical' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
+              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[12px] font-bold uppercase transition-colors ${layoutMode === 'vertical' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
               title="Disposición Vertical"
             >
               <Rows className="w-3.5 h-3.5" />
@@ -620,7 +622,7 @@ export default function CutPlanViewer({
             </button>
             <button
               onClick={() => setLayoutMode('grid')}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[9px] font-bold uppercase transition-colors ${layoutMode === 'grid' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
+              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[12px] font-bold uppercase transition-colors ${layoutMode === 'grid' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
               title="Disposición en Cuadrícula"
             >
               <Grid className="w-3.5 h-3.5" />
@@ -628,7 +630,7 @@ export default function CutPlanViewer({
             </button>
             <button
               onClick={() => setLayoutMode('horizontal')}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[9px] font-bold uppercase transition-colors ${layoutMode === 'horizontal' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
+              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[12px] font-bold uppercase transition-colors ${layoutMode === 'horizontal' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
               title="Disposición Horizontal Side-by-Side"
             >
               <LayoutList className="w-3.5 h-3.5" />
@@ -641,18 +643,18 @@ export default function CutPlanViewer({
           {/* Quick Metrics Bar */}
           <div className="hidden sm:flex gap-2 sm:gap-4 shrink-0 items-center">
             <div className="flex flex-col">
-              <span className="text-[7px] sm:text-[8px] text-[#aaaaaa] uppercase tracking-tighter">Efic. Total</span>
-              <span className={`text-[10px] sm:text-xs font-mono font-bold ${totalStats.efficiency > 85 ? 'text-emerald-400' : totalStats.efficiency > 70 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
+              <span className="text-[11px] sm:text-[11px] text-[#aaaaaa] uppercase tracking-tighter">Efic. Total</span>
+              <span className={`text-[12px] sm:text-xs font-mono font-bold ${totalStats.efficiency > 85 ? 'text-emerald-400' : totalStats.efficiency > 70 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
                 {totalStats.efficiency.toFixed(1)}%
               </span>
             </div>
             <div className="flex flex-col">
-              <span className="text-[7px] sm:text-[8px] text-[#aaaaaa] uppercase tracking-tighter">Planchas</span>
-              <span className="text-[10px] sm:text-xs font-mono font-bold text-white">{totalStats.boardsCount}</span>
+              <span className="text-[11px] sm:text-[11px] text-[#aaaaaa] uppercase tracking-tighter">Planchas</span>
+              <span className="text-[12px] sm:text-xs font-mono font-bold text-white">{totalStats.boardsCount}</span>
             </div>
             <div className="flex flex-col hidden xs:flex">
-              <span className="text-[7px] sm:text-[8px] text-[#aaaaaa] uppercase tracking-tighter">Área Útil</span>
-              <span className="text-[10px] sm:text-xs font-mono font-bold text-[#cccccc]">{(totalStats.areaUsed / 1000000).toFixed(2)}m²</span>
+              <span className="text-[11px] sm:text-[11px] text-[#aaaaaa] uppercase tracking-tighter">Área Útil</span>
+              <span className="text-[12px] sm:text-xs font-mono font-bold text-[#cccccc]">{(totalStats.areaUsed / 1000000).toFixed(2)}m²</span>
             </div>
           </div>
         </div>
@@ -661,13 +663,23 @@ export default function CutPlanViewer({
           <button 
             type="button"
             onClick={() => setShowSettings(!showSettings)}
-            className={`flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 rounded text-[9px] sm:text-[10px] font-bold uppercase transition-all shrink-0 ${showSettings ? 'bg-[#f0a144] text-black shadow-lg font-black' : 'bg-[#181818] border border-[#333333] text-[#aaaaaa] hover:bg-[#333333] hover:text-white'}`}
+            className={`flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 rounded text-[12px] sm:text-[12px] font-bold uppercase transition-all shrink-0 ${showSettings ? 'bg-[#f0a144] text-black shadow-lg font-black' : 'bg-[#181818] border border-[#333333] text-[#aaaaaa] hover:bg-[#333333] hover:text-white'}`}
           >
             <Settings className={`w-3.5 h-3.5 ${showSettings ? 'animate-spin-slow' : ''}`} />
             <span className="hidden sm:inline">Ajustes</span>
           </button>
         </div>
       </div>
+
+      {unplacedPieces.length > 0 && (
+        <div className="shrink-0 px-3 sm:px-4 py-2.5 bg-rose-950/45 border-b border-rose-500/30 text-rose-100 flex items-start gap-2.5 z-20" role="alert">
+          <div className="w-5 h-5 rounded-full bg-rose-500/20 flex items-center justify-center text-rose-300 font-black text-xs shrink-0">!</div>
+          <div className="min-w-0">
+            <div className="text-xs font-extrabold">{unplacedPieces.length} {unplacedPieces.length === 1 ? 'pieza no cabe' : 'piezas no caben'} en la plancha configurada</div>
+            <div className="text-[13px] text-rose-200/75 truncate mt-0.5">{unplacedPieces.join(' · ')}</div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* Mobile Settings Overlay Backdrop */}
@@ -685,10 +697,10 @@ export default function CutPlanViewer({
           <div className="bg-[#181818] border-b border-[#2a2a2a] px-2 sm:px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 shrink-0 shadow-md z-20">
             {/* Sheet Selector Tabs */}
             <div className="flex items-center gap-1 overflow-x-auto max-w-full no-scrollbar py-0.5">
-              <span className="text-[9px] font-bold text-[#888888] uppercase tracking-wider mr-1 hidden lg:inline">Planchas:</span>
+              <span className="text-[12px] font-bold text-[#888888] uppercase tracking-wider mr-1 hidden lg:inline">Planchas:</span>
               <button
                 onClick={() => setSelectedBoardFilter('all')}
-                className={`px-2.5 py-1 rounded-lg text-[9px] sm:text-[10px] font-bold uppercase transition-colors shrink-0 ${selectedBoardFilter === 'all' ? 'bg-[#f0a144] text-black shadow font-black' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
+                className={`px-2.5 py-1 rounded-lg text-[12px] sm:text-[12px] font-bold uppercase transition-colors shrink-0 ${selectedBoardFilter === 'all' ? 'bg-[#f0a144] text-black shadow font-black' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
               >
                 Todas ({totalStats.boardsCount})
               </button>
@@ -696,7 +708,7 @@ export default function CutPlanViewer({
                 <button
                   key={bIdx}
                   onClick={() => setSelectedBoardFilter(bIdx)}
-                  className={`px-2 py-1 rounded-lg text-[9px] sm:text-[10px] font-mono font-bold uppercase transition-colors shrink-0 ${selectedBoardFilter === bIdx ? 'bg-[#f0a144] text-black shadow' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
+                  className={`px-2 py-1 rounded-lg text-[12px] sm:text-[12px] font-mono font-bold uppercase transition-colors shrink-0 ${selectedBoardFilter === bIdx ? 'bg-[#f0a144] text-black shadow' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
                 >
                   Plancha {bIdx + 1 < 10 ? '0' : ''}{bIdx + 1}
                 </button>
@@ -704,7 +716,7 @@ export default function CutPlanViewer({
             </div>
 
             {/* Material & Edgeband Summary Badges */}
-            <div className="hidden xl:flex items-center gap-3 text-[9px] font-mono bg-[#222222] border border-[#333333] px-3 py-1 rounded-lg text-[#aaa]">
+            <div className="hidden xl:flex items-center gap-3 text-[12px] font-mono bg-[#222222] border border-[#333333] px-3 py-1 rounded-lg text-[#aaa]">
               <div className="flex items-center gap-1.5">
                 <BarChart3 className="w-3.5 h-3.5 text-[#f0a144]" />
                 <span className="text-white font-bold uppercase">18mm MELAMINA</span>
@@ -742,7 +754,7 @@ export default function CutPlanViewer({
 
           {/* BANDEJA SUPERIOR 2: OPCIONES DE CAPAS CAD Y ACCIONES */}
           <div className="bg-[#181818] border-b border-[#2d2d2d] px-2 sm:px-4 py-1.5 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar shrink-0 shadow-sm z-10">
-            <div className="flex items-center gap-3 sm:gap-4 shrink-0 text-[10px] font-mono text-[#cccccc] select-none">
+            <div className="flex items-center gap-3 sm:gap-4 shrink-0 text-[12px] font-mono text-[#cccccc] select-none">
               
               {/* Checkbox: Show Piece Dimensions */}
               <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
@@ -752,7 +764,7 @@ export default function CutPlanViewer({
                   onChange={(e) => setShowPieceDims(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Tamaño Piezas</span>
+                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Tamaño Piezas</span>
               </label>
 
               {/* Checkbox: Show Waste / Offcut Dimensions */}
@@ -763,7 +775,7 @@ export default function CutPlanViewer({
                   onChange={(e) => setShowWasteDims(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Tamaño Desechos</span>
+                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Tamaño Desechos</span>
               </label>
 
               {/* Checkbox: Show Piece Labels/Names */}
@@ -774,7 +786,7 @@ export default function CutPlanViewer({
                   onChange={(e) => setShowPieceNames(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Etiqueta / Nombre</span>
+                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Etiqueta / Nombre</span>
               </label>
 
               {/* Checkbox: Show Edgeband Lines */}
@@ -785,7 +797,7 @@ export default function CutPlanViewer({
                   onChange={(e) => setShowEdgebandLines(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="flex items-center gap-1 text-[9px] sm:text-[10px] font-sans font-medium">
+                <span className="flex items-center gap-1 text-[12px] sm:text-[12px] font-sans font-medium">
                   <span className="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
                   Bandas de Bordes
                 </span>
@@ -799,7 +811,7 @@ export default function CutPlanViewer({
                   onChange={(e) => setShowCutIndex(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Índice Corte</span>
+                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Índice Corte</span>
               </label>
 
               {/* Checkbox: Show Sheet Outer Dimension Lines */}
@@ -810,7 +822,7 @@ export default function CutPlanViewer({
                   onChange={(e) => setShowSheetRulers(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Cotas Plancha</span>
+                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Cotas Plancha</span>
               </label>
 
             </div>
@@ -820,7 +832,7 @@ export default function CutPlanViewer({
               {/* Espejo (Mirror Layout Button) */}
               <button
                 onClick={() => setIsMirrored(!isMirrored)}
-                className={`flex items-center gap-1 px-2 py-1 rounded text-[9px] font-bold uppercase border transition-colors ${isMirrored ? 'bg-[#f0a144] text-black border-[#f0a144]' : 'bg-[#222222] text-[#aaa] border-[#333] hover:text-white'}`}
+                className={`flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase border transition-colors ${isMirrored ? 'bg-[#f0a144] text-black border-[#f0a144]' : 'bg-[#222222] text-[#aaa] border-[#333] hover:text-white'}`}
                 title="Voltear horizontalmente (Modo Espejo)"
               >
                 <FlipHorizontal className="w-3.5 h-3.5" />
@@ -830,7 +842,7 @@ export default function CutPlanViewer({
               {/* Theme Toggle (Plano CAD Blanco vs Modo Oscuro) */}
               <button
                 onClick={() => setCadTheme(isLightCAD ? 'dark' : 'light')}
-                className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-bold uppercase bg-[#222222] border border-[#333333] text-[#aaaaaa] hover:text-white transition-colors"
+                className="flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase bg-[#222222] border border-[#333333] text-[#aaaaaa] hover:text-white transition-colors"
                 title={isLightCAD ? "Cambiar a Modo Oscuro" : "Cambiar a Plano Blanco CAD (Software Tradicional)"}
               >
                 {isLightCAD ? (
@@ -865,16 +877,16 @@ export default function CutPlanViewer({
                       <div className="flex items-center gap-3">
                         <BarChart3 className="w-4 h-4 sm:w-5 sm:h-5 text-[#f0a144] shrink-0" />
                         <div className="flex flex-col">
-                          <span className="text-[10px] sm:text-[12px] font-black text-white uppercase tracking-[0.1em]">
+                          <span className="text-[12px] sm:text-[12px] font-black text-white uppercase tracking-[0.1em]">
                             {group.material} · {group.thickness} mm
                           </span>
-                          <span className="text-[8px] sm:text-[9px] text-[#a0a0a0] font-mono">
+                          <span className="text-[11px] sm:text-[12px] text-[#a0a0a0] font-mono">
                              Formato Plancha: {group.config.width} x {group.config.height} mm | Planchas requeridas: {group.boards.length} | Eficiencia: {group.stats.efficiency.toFixed(1)}%
                           </span>
                         </div>
                       </div>
 
-                      <div className="hidden md:flex items-center gap-3 text-[9px] font-mono text-[#aaa]">
+                      <div className="hidden md:flex items-center gap-3 text-[12px] font-mono text-[#aaa]">
                         <span className="flex items-center gap-1">
                           <span className="w-2.5 h-2.5 bg-red-600 rounded-sm inline-block"></span>
                           Canto Grueso: <strong className="text-white">{edgebandingTotals.thick} m</strong>
@@ -916,15 +928,15 @@ export default function CutPlanViewer({
                             {/* Board Header Bar */}
                             <div className="flex items-center justify-between border-b border-[#333333] pb-1.5 px-1">
                               <div className="flex items-center gap-2">
-                                <span className="px-2 py-0.5 rounded-md bg-[#f0a144] text-black font-black text-[9px] sm:text-[10px] uppercase tracking-wider shadow">
+                                <span className="px-2 py-0.5 rounded-md bg-[#f0a144] text-black font-black text-[12px] sm:text-[12px] uppercase tracking-wider shadow">
                                   Plancha {globalIndex + 1 < 10 ? '0' : ''}{globalIndex + 1}
                                 </span>
-                                <span className="text-[9px] sm:text-[10px] font-mono font-bold text-white">
+                                <span className="text-[12px] sm:text-[12px] font-mono font-bold text-white">
                                   {boardWidth} x {boardHeight} mm
                                 </span>
                               </div>
 
-                              <div className="flex items-center gap-2 sm:gap-4 text-[8px] sm:text-[9px] font-mono">
+                              <div className="flex items-center gap-2 sm:gap-4 text-[11px] sm:text-[12px] font-mono">
                                 <span className="text-[#a0a0a0]">
                                   Piezas: <strong className="text-white">{board.rects.length}</strong>
                                 </span>
@@ -976,7 +988,7 @@ export default function CutPlanViewer({
 
                                   {/* RULERS / SHEET COTAS */}
                                   {showSheetRulers && (
-                                    <g className="sheet-rulers font-mono font-bold text-[9px]">
+                                    <g className="sheet-rulers font-mono font-bold text-[12px]">
                                       {/* Top Dimension (Width) */}
                                       <line 
                                         x1={rulerOffset} 
@@ -1273,7 +1285,7 @@ export default function CutPlanViewer({
                               </div>
 
                               {/* Footer Description under 2D Board (Exact match to Cutting Optimization Pro footer) */}
-                              <div className="mt-2 text-[10px] font-mono font-bold text-[#444444] dark:text-[#a0a0a0] flex items-center justify-center gap-2 bg-white dark:bg-[#222222] px-3 py-1 rounded border border-[#cccccc] dark:border-[#333333] shadow-sm select-none">
+                              <div className="mt-2 text-[12px] font-mono font-bold text-[#444444] dark:text-[#a0a0a0] flex items-center justify-center gap-2 bg-white dark:bg-[#222222] px-3 py-1 rounded border border-[#cccccc] dark:border-[#333333] shadow-sm select-none">
                                 <span>Material = <strong className="text-black dark:text-white">{group.material} · {group.thickness} mm</strong></span>
                                 <span>;</span>
                                 <span>Etiqueta = <strong className="text-black dark:text-white">MELAMINA</strong></span>
@@ -1314,10 +1326,10 @@ export default function CutPlanViewer({
                className="h-10 border-b border-[#333333] bg-[#1a1a1a] flex items-center justify-between px-2 sm:px-4 shrink-0 shadow-sm select-none w-full max-w-full overflow-hidden gap-1 box-border"
              >
                <div className="flex items-center gap-1.5 sm:gap-3 min-w-0 overflow-hidden">
-                 <span className="text-[10px] sm:text-[11px] font-black text-white uppercase tracking-widest flex items-center gap-1 truncate">
+                 <span className="text-[12px] sm:text-[13px] font-black text-white uppercase tracking-widest flex items-center gap-1 truncate">
                    <Layers3 className="w-3.5 h-3.5 text-[#f0a144] shrink-0" />
                    Listado de Piezas
-                   <span className="bg-[#333333] text-[#f0a144] px-1.5 py-0.5 rounded text-[8px] sm:text-[9px] font-mono ml-0.5 shrink-0">
+                   <span className="bg-[#333333] text-[#f0a144] px-1.5 py-0.5 rounded text-[11px] sm:text-[12px] font-mono ml-0.5 shrink-0">
                      {groupedPieces.length} únicas ({pieces.reduce((a, b) => a + b.cantidad, 0)} total)
                    </span>
                  </span>
@@ -1325,7 +1337,7 @@ export default function CutPlanViewer({
                  {onConsolidatePieces && (
                    <button 
                      onClick={(e) => { e.stopPropagation(); onConsolidatePieces(); }}
-                     className="hidden xs:flex items-center gap-1 px-2 py-0.5 bg-[#333333] hover:bg-[#444444] text-white text-[8px] font-bold uppercase rounded border border-[#555555] transition-colors shrink-0"
+                     className="hidden xs:flex items-center gap-1 px-2 py-0.5 bg-[#333333] hover:bg-[#444444] text-white text-[11px] font-bold uppercase rounded border border-[#555555] transition-colors shrink-0"
                      title="Agrupar piezas idénticas automáticamente"
                    >
                      Agrupar
@@ -1343,7 +1355,7 @@ export default function CutPlanViewer({
                        value={pieceSearch}
                        onChange={(e) => setPieceSearch(e.target.value)}
                        placeholder="Buscar..."
-                       className="bg-transparent border-none outline-none text-[10px] text-white placeholder-[#777777] w-14 xs:w-20 sm:w-28 py-0.5 min-w-0"
+                       className="bg-transparent border-none outline-none text-[12px] text-white placeholder-[#777777] w-14 xs:w-20 sm:w-28 py-0.5 min-w-0"
                      />
                    </div>
                  )}
@@ -1353,14 +1365,14 @@ export default function CutPlanViewer({
                    <div className="flex items-center bg-[#2a2a2a] border border-[#444444] p-0.5 rounded-lg">
                      <button 
                        onClick={() => setPieceViewMode('table')}
-                       className={`p-1 rounded text-[9px] font-bold transition-colors ${pieceViewMode === 'table' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
+                       className={`p-1 rounded text-[12px] font-bold transition-colors ${pieceViewMode === 'table' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
                        title="Modo Tabla de Datos"
                      >
                        <Table className="w-3.5 h-3.5" />
                      </button>
                      <button 
                        onClick={() => setPieceViewMode('cards')}
-                       className={`p-1 rounded text-[9px] font-bold transition-colors ${pieceViewMode === 'cards' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
+                       className={`p-1 rounded text-[12px] font-bold transition-colors ${pieceViewMode === 'cards' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
                        title="Modo Tarjetas"
                      >
                        <Grid className="w-3.5 h-3.5" />
@@ -1373,7 +1385,7 @@ export default function CutPlanViewer({
                    {/* Botón Bajar / Minimizar Ventana */}
                    <button
                      onClick={() => setIsListCollapsed(!isListCollapsed)}
-                     className={`flex items-center gap-1 px-1.5 py-1 rounded text-[9px] font-bold uppercase transition-colors ${isListCollapsed ? 'bg-[#f0a144] text-black shadow font-black' : 'text-[#aaa] hover:text-white hover:bg-[#333]'}`}
+                     className={`flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-colors ${isListCollapsed ? 'bg-[#f0a144] text-black shadow font-black' : 'text-[#aaa] hover:text-white hover:bg-[#333]'}`}
                      title={isListCollapsed ? "Ampliar Ventana" : "Bajar Ventana para ver más Plano de Corte"}
                    >
                      <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isListCollapsed ? 'rotate-180' : ''}`} />
@@ -1383,7 +1395,7 @@ export default function CutPlanViewer({
                    {/* Botón Acomodar (Media 260px) */}
                    <button
                      onClick={() => { setIsListCollapsed(false); setListPanelHeight(260); }}
-                     className={`hidden sm:flex items-center gap-1 px-1.5 py-1 rounded text-[9px] font-bold uppercase transition-colors ${!isListCollapsed && listPanelHeight === 260 ? 'bg-[#333333] text-[#f0a144]' : 'text-[#888888] hover:text-white'}`}
+                     className={`hidden sm:flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-colors ${!isListCollapsed && listPanelHeight === 260 ? 'bg-[#333333] text-[#f0a144]' : 'text-[#888888] hover:text-white'}`}
                      title="Acomodar a tamaño mediano (260px)"
                    >
                      <Rows className="w-3.5 h-3.5" />
@@ -1393,7 +1405,7 @@ export default function CutPlanViewer({
                    {/* Botón Ampliar (Grande 480px) */}
                    <button
                      onClick={() => { setIsListCollapsed(false); setListPanelHeight(480); }}
-                     className={`hidden sm:flex items-center gap-1 px-1.5 py-1 rounded text-[9px] font-bold uppercase transition-colors ${!isListCollapsed && listPanelHeight >= 450 ? 'bg-[#333333] text-[#f0a144]' : 'text-[#888888] hover:text-white'}`}
+                     className={`hidden sm:flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-colors ${!isListCollapsed && listPanelHeight >= 450 ? 'bg-[#333333] text-[#f0a144]' : 'text-[#888888] hover:text-white'}`}
                      title="Ampliar ventana listado de piezas (480px)"
                    >
                      <ChevronUp className="w-3.5 h-3.5" />
@@ -1408,9 +1420,9 @@ export default function CutPlanViewer({
                {pieceViewMode === 'table' ? (
                  /* TABLA DE PIEZAS HIGH-DENSITY */
                  <div className="w-full overflow-x-auto">
-                   <table className="w-full text-left border-collapse font-sans text-[10px] min-w-[700px]">
+                   <table className="w-full text-left border-collapse font-sans text-[12px] min-w-[700px]">
                      <thead>
-                       <tr className="border-b border-[#383838] bg-[#1a1a1a] text-[#a0a0a0] font-mono text-[9px] uppercase tracking-wider sticky top-0 z-10">
+                       <tr className="border-b border-[#383838] bg-[#1a1a1a] text-[#a0a0a0] font-mono text-[12px] uppercase tracking-wider sticky top-0 z-10">
                          <th className="py-2 px-2.5">Cant.</th>
                          <th className="py-2 px-2.5">Nombre</th>
                          <th className="py-2 px-2.5">Largo X (mm)</th>
@@ -1514,7 +1526,7 @@ export default function CutPlanViewer({
                                      <button 
                                        key={edgeKey} 
                                        onClick={(e) => { e.stopPropagation(); toggleCanto(); }}
-                                       className={`px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase transition-all ${
+                                       className={`px-1.5 py-0.5 rounded text-[11px] font-mono font-bold uppercase transition-all ${
                                          isThick ? 'bg-red-950/90 border border-red-500 text-red-300' :
                                          isThin ? 'bg-blue-950/90 border border-blue-500 text-blue-300' :
                                          'bg-[#1a1a1a] border border-[#383838] text-[#777777] hover:text-white'
@@ -1533,7 +1545,7 @@ export default function CutPlanViewer({
                                <div className="flex items-center justify-center gap-1.5">
                                  {totalQuantity > 1 && (
                                    <div className="flex items-center gap-1 bg-[#1a1a1a] border border-[#444444] rounded px-1.5 py-0.5">
-                                     <span className="text-[8px] text-[#888] font-mono uppercase">Cant:</span>
+                                     <span className="text-[11px] text-[#888] font-mono uppercase">Cant:</span>
                                      <input 
                                        type="number"
                                        min="1"
@@ -1543,15 +1555,15 @@ export default function CutPlanViewer({
                                          const val = Math.min(totalQuantity, Math.max(1, parseInt(e.target.value) || 1));
                                          setRotateQtyMap(prev => ({ ...prev, [key]: val }));
                                        }}
-                                       className="w-8 bg-transparent text-center text-white font-mono text-[9px] font-bold outline-none"
+                                       className="w-8 bg-transparent text-center text-white font-mono text-[12px] font-bold outline-none"
                                        title="Cantidad de piezas a rotar"
                                      />
-                                     <span className="text-[8px] text-[#666] font-mono">/{totalQuantity}</span>
+                                     <span className="text-[11px] text-[#666] font-mono">/{totalQuantity}</span>
                                    </div>
                                  )}
                                  <button
                                    onClick={() => handleRotateGroup(group, rotateQtyMap[key] ?? totalQuantity)}
-                                   className="px-2 py-0.5 rounded bg-[#333333] hover:bg-[#f0a144] hover:text-black text-white text-[9px] font-bold font-mono uppercase border border-[#555555] transition-colors flex items-center gap-1 shadow-sm shrink-0"
+                                   className="px-2 py-0.5 rounded bg-[#333333] hover:bg-[#f0a144] hover:text-black text-white text-[12px] font-bold font-mono uppercase border border-[#555555] transition-colors flex items-center gap-1 shadow-sm shrink-0"
                                    title={`Rotar ${rotateQtyMap[key] && rotateQtyMap[key] < totalQuantity ? `${rotateQtyMap[key]} piezas` : 'todas las piezas'}`}
                                  >
                                    <RotateCw className="w-3 h-3 text-[#f0a144]" />
@@ -1596,7 +1608,7 @@ export default function CutPlanViewer({
                          {/* Header: Quantity & Name */}
                          <div className="flex items-center justify-between gap-1 w-full min-w-0">
                              <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                                <div className="bg-[#333333] px-1.5 py-0.5 rounded text-[10px] font-mono text-[#f0a144] font-black shrink-0">
+                                <div className="bg-[#333333] px-1.5 py-0.5 rounded text-[12px] font-mono text-[#f0a144] font-black shrink-0">
                                   {totalQuantity}x
                                 </div>
                                 <input 
@@ -1604,12 +1616,12 @@ export default function CutPlanViewer({
                                   value={piece.name}
                                   onChange={(e) => handleUpdate({ name: e.target.value })}
                                   onClick={(e) => e.stopPropagation()}
-                                  className="bg-transparent border-none outline-none text-[11px] font-black text-white focus:text-[#f0a144] min-w-0 w-full uppercase truncate"
+                                  className="bg-transparent border-none outline-none text-[13px] font-black text-white focus:text-[#f0a144] min-w-0 w-full uppercase truncate"
                                   placeholder={`Pieza ${idx+1}`}
                                 />
                              </div>
                              <div className="flex items-center gap-1 shrink-0">
-                                <div className="bg-[#222222] border border-[#444444] px-1.5 py-0.5 rounded text-[9px] font-bold text-[#aaaaaa] font-mono">
+                                <div className="bg-[#222222] border border-[#444444] px-1.5 py-0.5 rounded text-[12px] font-bold text-[#aaaaaa] font-mono">
                                   {piece.espesor || 18}mm
                                 </div>
                              </div>
@@ -1618,24 +1630,24 @@ export default function CutPlanViewer({
                          {/* Dimensions: Largo X and Ancho Y */}
                          <div className="flex gap-1.5 bg-[#222222] p-1.5 rounded-lg border border-[#333333] w-full min-w-0">
                            <div className="flex-1 min-w-0 flex flex-col">
-                             <span className="text-[7px] text-[#888888] font-bold uppercase tracking-wider mb-0.5">LARGO (X)</span>
+                             <span className="text-[11px] text-[#888888] font-bold uppercase tracking-wider mb-0.5">LARGO (X)</span>
                              <input 
                                type="number"
                                value={piece.largo === 0 ? '' : Math.round(piece.largo)}
                                onChange={(e) => handleUpdate({ largo: parseFloat(e.target.value) || 0 })}
                                onClick={(e) => e.stopPropagation()}
-                               className="w-full min-w-0 bg-[#1a1a1a] border border-[#444444] rounded text-[10px] sm:text-[11px] text-white font-mono font-bold px-1 py-1 text-center focus:border-[#f0a144] outline-none"
+                               className="w-full min-w-0 bg-[#1a1a1a] border border-[#444444] rounded text-[12px] sm:text-[13px] text-white font-mono font-bold px-1 py-1 text-center focus:border-[#f0a144] outline-none"
                              />
                            </div>
 
                            <div className="flex-1 min-w-0 flex flex-col">
-                             <span className="text-[7px] text-[#888888] font-bold uppercase tracking-wider mb-0.5">ANCHO (Y)</span>
+                             <span className="text-[11px] text-[#888888] font-bold uppercase tracking-wider mb-0.5">ANCHO (Y)</span>
                              <input 
                                type="number"
                                value={piece.ancho === 0 ? '' : Math.round(piece.ancho)}
                                onChange={(e) => handleUpdate({ ancho: parseFloat(e.target.value) || 0 })}
                                onClick={(e) => e.stopPropagation()}
-                               className="w-full min-w-0 bg-[#1a1a1a] border border-[#444444] rounded text-[10px] sm:text-[11px] text-white font-mono font-bold px-1 py-1 text-center focus:border-[#f0a144] outline-none"
+                               className="w-full min-w-0 bg-[#1a1a1a] border border-[#444444] rounded text-[12px] sm:text-[13px] text-white font-mono font-bold px-1 py-1 text-center focus:border-[#f0a144] outline-none"
                              />
                            </div>
                          </div>
@@ -1665,10 +1677,10 @@ export default function CutPlanViewer({
                                   }`}
                                   title={`${edgeKey === 'largo1' ? 'L1' : edgeKey === 'largo2' ? 'L2' : edgeKey === 'ancho1' ? 'A1' : 'A2'}: Click para cambiar (${val})`}
                                 >
-                                  <span className="text-[8px] font-mono font-bold uppercase truncate w-full text-center leading-none mb-0.5">
+                                  <span className="text-[11px] font-mono font-bold uppercase truncate w-full text-center leading-none mb-0.5">
                                     {edgeKey === 'largo1' ? 'L1' : edgeKey === 'largo2' ? 'L2' : edgeKey === 'ancho1' ? 'A1' : 'A2'}
                                   </span>
-                                  <span className="text-[7px] font-mono font-semibold truncate w-full text-center leading-none">
+                                  <span className="text-[11px] font-mono font-semibold truncate w-full text-center leading-none">
                                     {isThick ? 'Grueso' : isThin ? 'Delgado' : 'Sin'}
                                   </span>
                                 </button>
@@ -1696,30 +1708,30 @@ export default function CutPlanViewer({
 
             <div className="space-y-4">
               <div className="space-y-2">
-                <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Formatos Rápidos</label>
+                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Formatos Rápidos</label>
                 <div className="grid grid-cols-2 gap-2">
                   <button 
                     onClick={() => onUpdateSheetConfig({ ...sheetConfig, width: 2440, height: 2140 })}
-                    className={`text-[8px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 2140 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
+                    className={`text-[11px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 2140 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
                   >
                     MELAMINA
-                    <br/><span className="text-[#666666] font-mono text-[7px]">2440 x 2140 mm</span>
+                    <br/><span className="text-[#666666] font-mono text-[11px]">2440 x 2140 mm</span>
                   </button>
                   <button 
                     onClick={() => onUpdateSheetConfig({ ...sheetConfig, width: 2440, height: 1850 })}
-                    className={`text-[8px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 1850 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
+                    className={`text-[11px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 1850 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
                   >
                     MDF / DUPROLAC
-                    <br/><span className="text-[#666666] font-mono text-[7px]">2440 x 1850 mm</span>
+                    <br/><span className="text-[#666666] font-mono text-[11px]">2440 x 1850 mm</span>
                   </button>
                 </div>
               </div>
 
               <div className="space-y-2">
-                <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Dimensión Plancha</label>
+                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Dimensión Plancha</label>
                 <div className="grid grid-cols-2 gap-2">
                   <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                    <span className="text-[8px] text-[#666666] block mb-1">ANCHO (X)</span>
+                    <span className="text-[11px] text-[#666666] block mb-1">ANCHO (X)</span>
                     <input 
                       type="number" 
                       value={sheetConfig.width === 0 ? '' : sheetConfig.width} 
@@ -1728,7 +1740,7 @@ export default function CutPlanViewer({
                     />
                   </div>
                   <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                    <span className="text-[8px] text-[#666666] block mb-1">LARGO (Y)</span>
+                    <span className="text-[11px] text-[#666666] block mb-1">LARGO (Y)</span>
                     <input 
                       type="number" 
                       value={sheetConfig.height === 0 ? '' : sheetConfig.height} 
@@ -1740,9 +1752,9 @@ export default function CutPlanViewer({
               </div>
 
               <div className="space-y-2">
-                <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Herramienta / Corte</label>
+                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Herramienta / Corte</label>
                 <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                  <span className="text-[8px] text-[#666666] block mb-1">ESPESOR SIERRA (MERMA)</span>
+                  <span className="text-[11px] text-[#666666] block mb-1">ESPESOR SIERRA (MERMA)</span>
                   <div className="flex items-center gap-2">
                     <input 
                       type="number" 
@@ -1751,15 +1763,15 @@ export default function CutPlanViewer({
                       onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, kerf: parseFloat(e.target.value) || 0 })}
                       className="bg-transparent border-none outline-none text-[#f0a144] text-xs font-mono w-full"
                     />
-                    <span className="text-[9px] text-[#666666] font-mono">MM</span>
+                    <span className="text-[12px] text-[#666666] font-mono">MM</span>
                   </div>
                 </div>
               </div>
 
               <div className="space-y-2">
-                <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Márgenes / Refilado</label>
+                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Márgenes / Refilado</label>
                 <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                  <span className="text-[8px] text-[#666666] block mb-1">RECORTE PERIMETRAL</span>
+                  <span className="text-[11px] text-[#666666] block mb-1">RECORTE PERIMETRAL</span>
                   <div className="flex items-center gap-2">
                     <input 
                       type="number" 
@@ -1767,7 +1779,7 @@ export default function CutPlanViewer({
                       onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, margin: parseInt(e.target.value) || 0 })}
                       className="bg-transparent border-none outline-none text-[#da3c3c] text-xs font-mono w-full"
                     />
-                    <span className="text-[9px] text-[#666666] font-mono">MM</span>
+                    <span className="text-[12px] text-[#666666] font-mono">MM</span>
                   </div>
                 </div>
               </div>
@@ -1776,28 +1788,28 @@ export default function CutPlanViewer({
                 <div className="bg-[#1a1a1a] border border-[#333333] rounded p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <BarChart3 className="w-3 h-3 text-[#f0a144]" />
-                    <span className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-wider">Estadísticas</span>
+                    <span className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-wider">Estadísticas</span>
                   </div>
                   <div className="space-y-1.5">
-                    <div className="flex justify-between text-[10px]">
-                      <span className="text-[#666666] text-[9px]">PIEZAS TOTALES:</span>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#666666] text-[12px]">PIEZAS TOTALES:</span>
                       <span className="text-white font-mono">{pieces.reduce((acc, p) => acc + p.cantidad, 0)}</span>
                     </div>
-                    <div className="flex justify-between text-[10px]">
-                      <span className="text-[#666666] text-[9px]">ÁREA USADA:</span>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#666666] text-[12px]">ÁREA USADA:</span>
                       <span className="text-white font-mono">{(totalStats.areaUsed / 1000000).toFixed(3)} m²</span>
                     </div>
-                    <div className="flex justify-between text-[10px]">
-                      <span className="text-[#666666] text-[9px]">PIEZAS ÚNICAS:</span>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#666666] text-[12px]">PIEZAS ÚNICAS:</span>
                       <span className="text-white font-mono">{pieces.length}</span>
                     </div>
                     <div className="h-px bg-[#333333] my-2" />
-                    <div className="flex justify-between text-[10px]">
-                      <span className="text-[#3b82f6] text-[8px] font-bold">CANTO DELGADO:</span>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#3b82f6] text-[11px] font-bold">CANTO DELGADO:</span>
                       <span className="text-[#3b82f6] font-mono font-bold">{edgebandingTotals.thin} m</span>
                     </div>
-                    <div className="flex justify-between text-[10px]">
-                      <span className="text-[#ef4444] text-[8px] font-bold">CANTO GRUESO:</span>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#ef4444] text-[11px] font-bold">CANTO GRUESO:</span>
                       <span className="text-[#ef4444] font-mono font-bold">{edgebandingTotals.thick} m</span>
                     </div>
                   </div>
@@ -1809,7 +1821,7 @@ export default function CutPlanViewer({
               <button 
                 type="button"
                 onClick={() => window.print()}
-                className="w-full bg-[#1a1a1a] hover:bg-[#333333] text-[#aaaaaa] hover:text-white border border-[#333333] py-3 rounded-lg flex items-center justify-center gap-2 text-[10px] font-bold uppercase transition-all shadow-xl"
+                className="w-full bg-[#1a1a1a] hover:bg-[#333333] text-[#aaaaaa] hover:text-white border border-[#333333] py-3 rounded-lg flex items-center justify-center gap-2 text-[12px] font-bold uppercase transition-all shadow-xl"
               >
                 Imprimir / Guardar PDF
               </button>
