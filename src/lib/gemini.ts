@@ -2,12 +2,12 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Piece } from "../types";
 import { v4 as uuidv4 } from "uuid";
 
-// Initialize the GenAI SDK
-let ai: GoogleGenAI;
-try {
-  ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-} catch (error) {
-  console.error("Failed to initialize GoogleGenAI. Is GEMINI_API_KEY set?", error);
+// AI import is optional; the CAD/CAM workflow remains fully local without a key.
+const geminiApiKey = process.env.GEMINI_API_KEY;
+export const isAiConfigured = Boolean(geminiApiKey);
+let ai: GoogleGenAI | null = null;
+if (geminiApiKey) {
+  ai = new GoogleGenAI({ apiKey: geminiApiKey });
 }
 
 export async function interpretFurnitureImage(base64Image: string, mimeType: string): Promise<Piece[]> {
