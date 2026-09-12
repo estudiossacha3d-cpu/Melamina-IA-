@@ -6,6 +6,8 @@ import {
   Maximize2, Minimize2, LayoutList, Table, Rows, Grid, Search, ChevronUp, ChevronDown, 
   Check, Layers3, Sun, Moon, FlipHorizontal, Printer, Download, Eye, EyeOff, Hash, GripHorizontal
 } from 'lucide-react';
+import { sheetGroupKey } from '../lib/project';
+import { professionalPack as professionalPackCore } from '../lib/cutOptimizer';
 
 interface CutPlanViewerProps {
   pieces: Piece[];
@@ -52,7 +54,7 @@ export interface PackedBoard {
 }
 
 // Professional Packing Algorithm: Guillotine with First-Fit Decreasing
-function professionalPack(
+export function professionalPack(
   pieces: Piece[], 
   config: SheetConfig
 ): { 
@@ -300,32 +302,34 @@ export default function CutPlanViewer({
   const listRef = useRef<HTMLDivElement>(null);
   
   const { boardGroups, totalStats } = useMemo(() => {
-    // Group pieces by thickness
-    const thicknessGroups: { [key: number]: Piece[] } = {};
+    // A physical sheet can only contain one material/colour and one thickness.
+    const sheetGroups: Record<string, Piece[]> = {};
     pieces.forEach(p => {
-      const thickness = p.espesor || 18;
-      if (!thicknessGroups[thickness]) thicknessGroups[thickness] = [];
-      thicknessGroups[thickness].push(p);
+      const key = sheetGroupKey(p);
+      if (!sheetGroups[key]) sheetGroups[key] = [];
+      sheetGroups[key].push(p);
     });
 
-    const results: { thickness: number, boards: PackedBoard[], stats: any, config: SheetConfig }[] = [];
+    const results: { thickness: number, material: string, boards: PackedBoard[], stats: any, config: SheetConfig }[] = [];
     let combinedAreaUsed = 0;
     let combinedTotalArea = 0;
     let combinedBoardsCount = 0;
 
-    Object.keys(thicknessGroups).forEach(thicknessStr => {
-      const thickness = parseFloat(thicknessStr);
-      const groupPieces = thicknessGroups[thickness];
+    Object.values(sheetGroups).forEach(groupPieces => {
+      const firstPiece = groupPieces[0];
+      const thickness = firstPiece.espesor || 18;
+      const material = firstPiece.material || 'Blanco';
       
       let groupConfig = { ...sheetConfig };
       if (thickness === 3) {
         groupConfig = { ...sheetConfig, width: 2440, height: 1850 };
       }
 
-      const packed = professionalPack(groupPieces, groupConfig);
+      const packed = professionalPackCore(groupPieces, groupConfig);
       
       results.push({
         thickness,
+        material,
         boards: packed.boards,
         stats: packed.stats,
         config: groupConfig
@@ -862,7 +866,7 @@ export default function CutPlanViewer({
                         <BarChart3 className="w-4 h-4 sm:w-5 sm:h-5 text-[#f0a144] shrink-0" />
                         <div className="flex flex-col">
                           <span className="text-[10px] sm:text-[12px] font-black text-white uppercase tracking-[0.1em]">
-                            Material: {group.thickness}mm - {group.thickness === 3 ? 'MDF / DUPROLAC' : 'MELAMINA'}
+                            {group.material} · {group.thickness} mm
                           </span>
                           <span className="text-[8px] sm:text-[9px] text-[#a0a0a0] font-mono">
                              Formato Plancha: {group.config.width} x {group.config.height} mm | Planchas requeridas: {group.boards.length} | Eficiencia: {group.stats.efficiency.toFixed(1)}%
@@ -1270,7 +1274,7 @@ export default function CutPlanViewer({
 
                               {/* Footer Description under 2D Board (Exact match to Cutting Optimization Pro footer) */}
                               <div className="mt-2 text-[10px] font-mono font-bold text-[#444444] dark:text-[#a0a0a0] flex items-center justify-center gap-2 bg-white dark:bg-[#222222] px-3 py-1 rounded border border-[#cccccc] dark:border-[#333333] shadow-sm select-none">
-                                <span>Material = <strong className="text-black dark:text-white">{group.thickness}mm {group.thickness === 3 ? 'MDF/DUPROLAC' : 'MELAMINA'}</strong></span>
+                                <span>Material = <strong className="text-black dark:text-white">{group.material} · {group.thickness} mm</strong></span>
                                 <span>;</span>
                                 <span>Etiqueta = <strong className="text-black dark:text-white">MELAMINA</strong></span>
                                 <span>;</span>
@@ -1804,10 +1808,10 @@ export default function CutPlanViewer({
             <div className="mt-auto">
               <button 
                 type="button"
-                onClick={() => alert('Generando informe técnico...')}
+                onClick={() => window.print()}
                 className="w-full bg-[#1a1a1a] hover:bg-[#333333] text-[#aaaaaa] hover:text-white border border-[#333333] py-3 rounded-lg flex items-center justify-center gap-2 text-[10px] font-bold uppercase transition-all shadow-xl"
               >
-                Generar Informe PDF
+                Imprimir / Guardar PDF
               </button>
             </div>
           </div>
