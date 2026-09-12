@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, Ruler, Play, Pointer } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
-import { interpretFurnitureImage } from './lib/gemini';
+import { interpretFurnitureImage, isAiConfigured } from './lib/gemini';
 import { Piece, EdgeConfig, Group3D } from './types';
 import ThreeViewer, { MATERIAL_MAP } from './components/ThreeViewer';
 import CutPlanViewer from './components/CutPlanViewer';
@@ -781,8 +781,12 @@ export default function App() {
            <ToolbarIcon icon={<Plus />} active={false} onClick={addPiece} />
            <ToolbarIcon icon={<Box />} active={false} onClick={handleLoadStarterProject} />
            <ToolbarIcon icon={<Trash2 />} active={false} onClick={() => pieces.length > 0 && setDeleteConfirm({ type: 'all' })} />
-           <div className="w-6 h-px bg-[#404040] my-1" />
-           <ToolbarIcon icon={<Upload />} active={false} onClick={() => fileInputRef.current?.click()} />
+           {isAiConfigured && (
+             <>
+               <div className="w-6 h-px bg-[#404040] my-1" />
+               <ToolbarIcon icon={<Upload />} active={false} onClick={() => fileInputRef.current?.click()} />
+             </>
+           )}
         </div>
 
         <div className="flex-1 relative flex flex-col">
@@ -797,7 +801,7 @@ export default function App() {
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-1 text-[10px] text-[#888888]">
                 <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                IA Engine: <span className="text-[#cccccc]">ACTIVE</span>
+                CAD/CAM: <span className="text-[#cccccc]">LISTO</span>
               </div>
             </div>
           </div>
@@ -925,8 +929,8 @@ export default function App() {
           {/* Bottom Status Bar */}
           <footer className="h-6 bg-[#2b2b2b] border-t border-[#1a1a1a] flex items-center px-4 justify-between text-[8px] sm:text-[9px] font-medium text-[#888888] shrink-0">
              <div className="flex items-center gap-2 sm:gap-4">
-               <span className="text-[#cccccc]"><span className="text-[#f0a144]">●</span> <span className="hidden sm:inline">IA Engine Online</span></span>
-               <span className="hidden sm:inline">Model: Gemini-3.1-Pro</span>
+               <span className="text-[#cccccc]"><span className="text-[#f0a144]">●</span> <span className="hidden sm:inline">Guardado local activo</span></span>
+               <span className="hidden sm:inline">Flujo CAD/CAM sin conexión externa</span>
                {activeDisplacement ? (
                  <div className="flex items-center gap-2 font-mono bg-[#1b1b1b] px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144]">
                    <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144] animate-ping" />
