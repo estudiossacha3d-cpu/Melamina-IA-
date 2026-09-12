@@ -20,6 +20,21 @@ body, html {
   touch-action: none;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@media print {
+  body,
+  html,
+  #root {
+    overflow: visible !important;
+    height: auto !important;
+    background: white !important;
+  }
+}
+
 #root {
   height: 100dvh;
   width: 100vw;
