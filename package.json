@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
+    "test": "esbuild tests/project.test.ts --bundle --platform=node --format=esm --outfile=/tmp/melamina-project-test.mjs && node --test /tmp/melamina-project-test.mjs",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
