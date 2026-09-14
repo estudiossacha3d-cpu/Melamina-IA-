@@ -94,7 +94,6 @@ test('parametric shelf module creates plinth, shelves and vertical divisions wit
   assert.equal(module.pieces.filter(piece => piece.name.startsWith('División vertical')).length, 1);
   assert.equal(module.pieces.filter(piece => piece.name === 'Zócalo frontal').length, 1);
   assert.equal(module.pieces.filter(piece => piece.name === 'Respaldo MDF 3 mm').length, 1);
-  assert.ok(module.pieces.every(piece => !piece.dynamic));
   assert.ok(module.pieces.every(piece => piece.groupId === module.group.id));
 
   const shelves = module.pieces.filter(piece => piece.name.startsWith('Repisa '));

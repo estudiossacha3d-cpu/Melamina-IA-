@@ -12,8 +12,6 @@ import {
   Combine,
   Ungroup,
   ListPlus,
-  Pointer,
-  Play,
   Plus,
   X,
 } from 'lucide-react';
@@ -41,9 +39,6 @@ interface ThreeViewerOverlayProps {
   canUndo: boolean;
   canRedo: boolean;
   onOpenProperties: () => void;
-  interactMode?: boolean;
-  onToggleInteractMode?: () => void;
-  onToggleAllDynamicPieces?: (open?: boolean) => void;
 }
 
 export default function ThreeViewerOverlay({
@@ -68,12 +63,8 @@ export default function ThreeViewerOverlay({
   canUndo,
   canRedo,
   onOpenProperties,
-  interactMode = false,
-  onToggleInteractMode,
-  onToggleAllDynamicPieces,
 }: ThreeViewerOverlayProps) {
   const selectedPiece = pieces.find(piece => piece.id === selectedPieceId);
-  const hasDynamicPieces = pieces.some(piece => piece.dynamic);
 
   return (
     <div className="absolute inset-0 pointer-events-none z-20 select-none">
@@ -101,12 +92,7 @@ export default function ThreeViewerOverlay({
             </div>
           )}
 
-          {hasDynamicPieces && onToggleAllDynamicPieces && (
-            <button type="button" onClick={() => onToggleAllDynamicPieces()} className="viewport-secondary-action" title="Abrir o cerrar puertas y cajones">
-              <Play className="w-4 h-4" />
-              <span className="hidden md:inline">Probar mueble</span>
-            </button>
-          )}
+
         </div>
 
         {selectedPiece && (
@@ -138,7 +124,6 @@ export default function ThreeViewerOverlay({
           <div className="flex flex-wrap gap-1.5 mt-3">
             {selectedPiece.veta && <span className="viewport-chip">Veta fija</span>}
             {selectedPiece.ranurado && <span className="viewport-chip">Ranura</span>}
-            {selectedPiece.dynamic && <span className="viewport-chip is-purple">Movimiento</span>}
             {Object.values(selectedPiece.cantos).some(value => value !== 'Ninguno') && <span className="viewport-chip is-blue">Con cantos</span>}
           </div>
 
@@ -154,20 +139,9 @@ export default function ThreeViewerOverlay({
       )}
 
       <div className="viewport-mode-switcher pointer-events-auto">
-        <GizmoButton icon={<Move />} active={!interactMode && transformMode === 'translate'} onClick={() => {
-          if (interactMode && onToggleInteractMode) onToggleInteractMode();
-          onChangeTransformMode('translate');
-        }} label="Mover" />
-        <GizmoButton icon={<RotateCcw />} active={!interactMode && transformMode === 'rotate'} onClick={() => {
-          if (interactMode && onToggleInteractMode) onToggleInteractMode();
-          onChangeTransformMode('rotate');
-        }} label="Girar" />
-        <GizmoButton icon={<Expand />} active={!interactMode && transformMode === 'scale'} onClick={() => {
-          if (interactMode && onToggleInteractMode) onToggleInteractMode();
-          onChangeTransformMode('scale');
-        }} label="Medir" />
-        <span className="w-px h-6 bg-[#3a444f] mx-0.5" />
-        <GizmoButton icon={<Pointer />} active={interactMode} onClick={onToggleInteractMode} label="Probar" color="text-purple-400" />
+        <GizmoButton icon={<Move />} active={transformMode === 'translate'} onClick={() => onChangeTransformMode('translate')} label="Mover" />
+        <GizmoButton icon={<RotateCcw />} active={transformMode === 'rotate'} onClick={() => onChangeTransformMode('rotate')} label="Girar" />
+        <GizmoButton icon={<Expand />} active={transformMode === 'scale'} onClick={() => onChangeTransformMode('scale')} label="Medir" />
       </div>
     </div>
   );

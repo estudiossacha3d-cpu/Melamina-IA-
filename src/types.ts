@@ -19,16 +19,6 @@ export interface SheetConfig {
   margin: number; // refilado
 }
 
-export interface DynamicAttributes {
-  type: 'door' | 'drawer' | 'shelf' | 'custom';
-  doorType?: 'single_left' | 'single_right' | 'double_left' | 'double_right' | 'lift_up';
-  pivotPoint?: 'left' | 'right' | 'top' | 'bottom';
-  openAngle?: number; // max open angle in degrees (e.g. 90)
-  slideAxis?: 'X' | 'Y' | 'Z';
-  slideDistance?: number; // max slide distance in mm (e.g. 350)
-  isOpen?: boolean;
-}
-
 export interface Piece {
   id: string;
   name: string;
@@ -54,5 +44,4 @@ export interface Piece {
     prof: number; // profundidad de ranura en mm
   };
   abisagrado?: boolean;
-  dynamic?: DynamicAttributes;
 }

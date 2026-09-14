@@ -1,5 +1,5 @@
 import React, { useRef, useState, useMemo, useEffect } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, TransformControls, Edges, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { Piece } from '../types';
@@ -62,8 +62,6 @@ interface ThreeViewerProps {
   transformMode?: 'translate' | 'rotate' | 'scale';
   snapActive?: boolean;
   onUnusedScale?: any;
-  interactMode?: boolean;
-  onToggleDynamicPiece?: (id: string) => void;
 }
 
 
@@ -167,9 +165,7 @@ const MelaminePiece = ({
   onEditDimensionAxis,
   hide3DLabels = false,
   transformMode = 'translate',
-  snapActive = false,
-  interactMode = false,
-  onToggleDynamicPiece
+  snapActive = false
 }: {
   piece: Piece;
   allPieces?: Piece[];
@@ -183,8 +179,6 @@ const MelaminePiece = ({
   hide3DLabels?: boolean;
   transformMode?: 'translate' | 'rotate' | 'scale';
   snapActive?: boolean;
-  interactMode?: boolean;
-  onToggleDynamicPiece?: (id: string) => void;
 }) => {
   const [mesh, setMesh] = useState<THREE.Mesh | null>(null);
   const [group, setGroup] = useState<THREE.Group | null>(null);
@@ -716,75 +710,6 @@ const MelaminePiece = ({
     };
   }, [group, mesh, showControls, transformMode, snapActive, piece.largo, piece.espesor, piece.ancho]);
 
-  // Dynamic Component (SketchUp) Animation & Pivot Logic
-  const pivotGroupRef = useRef<THREE.Group>(null);
-  const progressRef = useRef<number>(piece.dynamic?.isOpen ? 1 : 0);
-
-  useFrame((_, delta) => {
-    if (!pivotGroupRef.current || !piece.dynamic) return;
-
-    const target = piece.dynamic.isOpen ? 1 : 0;
-    progressRef.current = THREE.MathUtils.lerp(progressRef.current, target, Math.min(1, 10 * delta));
-    const p = progressRef.current;
-
-    if (piece.dynamic.type === 'door') {
-      const maxAngleRad = THREE.MathUtils.degToRad(piece.dynamic.openAngle ?? 95);
-      const doorType = piece.dynamic.doorType || 'single_left';
-      const pivot = piece.dynamic.pivotPoint || (doorType.includes('right') ? 'right' : doorType === 'lift_up' ? 'top' : 'left');
-
-      if (pivot === 'left') {
-        pivotGroupRef.current.rotation.y = -p * maxAngleRad;
-      } else if (pivot === 'right') {
-        pivotGroupRef.current.rotation.y = p * maxAngleRad;
-      } else if (pivot === 'top') {
-        pivotGroupRef.current.rotation.x = -p * maxAngleRad;
-      } else if (pivot === 'bottom') {
-        pivotGroupRef.current.rotation.x = p * maxAngleRad;
-      }
-    } else if (piece.dynamic.type === 'drawer') {
-      const slideDist = (piece.dynamic.slideDistance ?? Math.max(200, piece.ancho * 0.85)) * scale;
-      const axis = piece.dynamic.slideAxis || 'Z';
-      if (axis === 'Z') {
-        pivotGroupRef.current.position.z = p * slideDist;
-      } else if (axis === 'X') {
-        pivotGroupRef.current.position.x = p * slideDist;
-      } else if (axis === 'Y') {
-        pivotGroupRef.current.position.y = p * slideDist;
-      }
-    }
-  });
-
-  const halfLargo = (piece.largo * scale) / 2;
-  const halfEspesor = (piece.espesor * scale) / 2;
-
-  const isDoor = piece.dynamic?.type === 'door';
-  const doorType = piece.dynamic?.doorType || 'single_left';
-  const pivot = piece.dynamic?.pivotPoint || (doorType.includes('right') ? 'right' : doorType === 'lift_up' ? 'top' : 'left');
-
-  let pivotOffset: [number, number, number] = [0, 0, 0];
-  let meshOffset: [number, number, number] = [0, 0, 0];
-
-  if (isDoor) {
-    if (pivot === 'left') {
-      pivotOffset = [-halfLargo, 0, 0];
-      meshOffset = [halfLargo, 0, 0];
-    } else if (pivot === 'right') {
-      pivotOffset = [halfLargo, 0, 0];
-      meshOffset = [-halfLargo, 0, 0];
-    } else if (pivot === 'top') {
-      pivotOffset = [0, halfEspesor, 0];
-      meshOffset = [0, -halfEspesor, 0];
-    } else if (pivot === 'bottom') {
-      pivotOffset = [0, -halfEspesor, 0];
-      meshOffset = [0, halfEspesor, 0];
-    }
-  }
-
-  // Handle double click for quick scale mode
-  const handleDoubleClick = (e: any) => {
-    e.stopPropagation();
-  };
-
   return (
     <group>
       {showControls && group && (
@@ -803,19 +728,12 @@ const MelaminePiece = ({
         position={pos}
         rotation={piece.rotation3D}
       >
-        <group ref={pivotGroupRef} position={pivotOffset}>
-          <mesh
-            ref={setMesh}
-            position={meshOffset}
-            rotation={[0, 0, 0]}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (interactMode && piece.dynamic && onToggleDynamicPiece) {
-                onToggleDynamicPiece(piece.id);
-              } else {
-                onClick(e);
-              }
-            }}
+        <mesh
+          ref={setMesh}
+          onClick={(e) => {
+            e.stopPropagation();
+            onClick(e);
+          }}
           onDoubleClick={(e) => {
              e.stopPropagation();
              window.dispatchEvent(new CustomEvent('request-transform-mode', { detail: 'scale' }));
@@ -826,31 +744,7 @@ const MelaminePiece = ({
           material={materials}
         >
           <boxGeometry args={dims} />
-          <Edges scale={1} threshold={15} color={flash ? '#10b981' : isSnapTarget ? '#3b82f6' : isSelected ? '#f0a144' : piece.dynamic ? '#a855f7' : '#111111'} />
-          
-          {/* Dynamic Component Badge Overlay */}
-          {piece.dynamic && (
-            <Html position={[0, (piece.espesor * scale) / 2 + 0.03, 0]} center>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (onToggleDynamicPiece) {
-                    onToggleDynamicPiece(piece.id);
-                  }
-                }}
-                className={`px-2 py-0.5 rounded-full backdrop-blur-md shadow-lg border text-[12px] font-black flex items-center gap-1.5 transition-all cursor-pointer pointer-events-auto select-none hover:scale-110 active:scale-95 ${
-                  piece.dynamic.isOpen 
-                    ? 'bg-purple-900/90 border-purple-400 text-purple-200' 
-                    : 'bg-[#18181b]/90 border-purple-500/50 text-purple-300 hover:border-purple-400'
-                }`}
-                title="Haz clic para abrir o cerrar"
-              >
-                <span className="text-[13px]">{piece.dynamic.type === 'door' ? '🚪' : '🗄️'}</span>
-                <span>{piece.dynamic.type === 'door' ? (piece.dynamic.isOpen ? 'Puerta Abierta' : 'Puerta Cerrada') : (piece.dynamic.isOpen ? 'Cajón Abierto' : 'Cajón Cerrado')}</span>
-              </button>
-            </Html>
-          )}
+          <Edges scale={1} threshold={15} color={flash ? '#10b981' : isSnapTarget ? '#3b82f6' : isSelected ? '#f0a144' : '#111111'} />
           
           {/* Dimensiones en tiempo real al arrastrar/seleccionar */}
           {!hide3DLabels && isSelected && transformMode === 'scale' && (
@@ -976,7 +870,6 @@ const MelaminePiece = ({
             </mesh>
           );
         })()}
-        </group>
       </group>
     </group>
   );
@@ -994,9 +887,7 @@ export default function ThreeViewer({
   hide3DLabels = false,
   transformMode,
   snapActive,
-  onUnusedScale,
-  interactMode,
-  onToggleDynamicPiece
+  onUnusedScale
 }: ThreeViewerProps) {
   const requestCameraView = (view: CameraView) => {
     window.dispatchEvent(new CustomEvent<CameraView>('cad-camera-view', { detail: view }));
@@ -1047,8 +938,6 @@ export default function ThreeViewer({
               hide3DLabels={hide3DLabels}
               transformMode={transformMode}
               snapActive={snapActive}
-              interactMode={interactMode}
-              onToggleDynamicPiece={onToggleDynamicPiece}
             />
           ))
         ))}
