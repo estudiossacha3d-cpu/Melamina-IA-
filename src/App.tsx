@@ -8,7 +8,7 @@ import ThreeViewer, { MATERIAL_MAP } from './components/ThreeViewer';
 import CutPlanViewer from './components/CutPlanViewer';
 import ThreeViewerOverlay from './components/ThreeViewerOverlay';
 import { createStarterProject, isProjectState, serializePiecesCsv } from './lib/project';
-import { createShelfModule, type ShelfModuleBack, type ShelfModuleConfig } from './lib/shelfModule';
+import { MODULE_CATEGORIES, type ModuleCategoryId } from './lib/moduleLibrary';
 
 const PROJECT_STORAGE_KEY = 'iamueble-project-v1';
 
@@ -137,48 +137,6 @@ const createPieceDraft = (index: number): PieceDraft => ({
   orientation: 'horizontal',
 });
 
-type ShelfModuleVariant = 'single' | 'double' | 'triple';
-
-interface ShelfModuleDraft extends ShelfModuleConfig {
-  variant: ShelfModuleVariant;
-}
-
-const SHELF_MODULE_VARIANTS: Array<{
-  id: ShelfModuleVariant;
-  label: string;
-  help: string;
-  values: Omit<ShelfModuleConfig, 'name' | 'material'>;
-}> = [
-  {
-    id: 'single',
-    label: '1 columna',
-    help: 'Estante angosto',
-    values: { width: 600, height: 1846, depth: 313, thickness: 18, plinthHeight: 80, plinthInset: 30, shelves: 4, verticalDividers: 0, back: 'mdf3' },
-  },
-  {
-    id: 'double',
-    label: '2 columnas',
-    help: 'Estante dividido',
-    values: { width: 1200, height: 1846, depth: 350, thickness: 18, plinthHeight: 80, plinthInset: 30, shelves: 4, verticalDividers: 1, back: 'mdf3' },
-  },
-  {
-    id: 'triple',
-    label: '3 columnas',
-    help: 'Exhibidor amplio',
-    values: { width: 1800, height: 1846, depth: 350, thickness: 18, plinthHeight: 80, plinthInset: 30, shelves: 4, verticalDividers: 2, back: 'mdf3' },
-  },
-];
-
-const createShelfModuleDraft = (variant: ShelfModuleVariant = 'single'): ShelfModuleDraft => {
-  const preset = SHELF_MODULE_VARIANTS.find(item => item.id === variant) || SHELF_MODULE_VARIANTS[0];
-  return {
-    variant,
-    name: 'Estante ' + preset.label,
-    material: 'Pelikano_Blanco_Absoluto',
-    ...preset.values,
-  };
-};
-
 export default function App() {
   const initialStateRef = useRef<AppState | null>(null);
   if (!initialStateRef.current) {
@@ -260,8 +218,9 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [newPieceDialogOpen, setNewPieceDialogOpen] = useState(false);
   const [pieceDraft, setPieceDraft] = useState<PieceDraft>(() => createPieceDraft(1));
-  const [moduleDialogOpen, setModuleDialogOpen] = useState(false);
-  const [moduleDraft, setModuleDraft] = useState<ShelfModuleDraft>(() => createShelfModuleDraft());
+  const [moduleLibraryOpen, setModuleLibraryOpen] = useState(false);
+  const [selectedModuleCategory, setSelectedModuleCategory] = useState<ModuleCategoryId>('shelves');
+  const activeModuleCategory = MODULE_CATEGORIES.find(category => category.id === selectedModuleCategory) ?? MODULE_CATEGORIES[0];
   const [outlinerSearch, setOutlinerSearch] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [sheetConfig, setSheetConfig] = useState<{ width: number; height: number; kerf: number; margin: number }>({
@@ -618,34 +577,9 @@ export default function App() {
     showNotice('Despiece CSV listo para abrir en Excel');
   };
 
-  const openShelfModuleDialog = () => {
-    setModuleDraft(createShelfModuleDraft());
+  const openModuleLibrary = () => {
     setMobileMenuOpen(false);
-    setModuleDialogOpen(true);
-  };
-
-  const createModuleFromDraft = () => {
-    try {
-      const rightEdge = pieces.reduce((maximum, piece) => (
-        Math.max(maximum, piece.position3D[0] + Math.max(piece.largo, piece.ancho, piece.espesor) / 2)
-      ), Number.NEGATIVE_INFINITY);
-      const originX = Number.isFinite(rightEdge) ? rightEdge + moduleDraft.width / 2 + 200 : 0;
-      const created = createShelfModule(moduleDraft, originX);
-
-      setAppState(previous => ({
-        pieces: [...previous.pieces, ...created.pieces],
-        groups: [...previous.groups, created.group],
-      }));
-      setSelectedPieceIds(created.pieces.length ? [created.pieces[0].id] : []);
-      setModuleDialogOpen(false);
-      setViewMode('3d');
-      showNotice(created.group.name + ': ' + created.pieces.length + ' piezas creadas');
-      window.setTimeout(() => {
-        window.dispatchEvent(new CustomEvent('cad-camera-view', { detail: 'fit' }));
-      }, 50);
-    } catch (error) {
-      showNotice(error instanceof Error ? error.message : 'No se pudo crear el módulo');
-    }
+    setModuleLibraryOpen(true);
   };
 
   const handleLoadModel = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -701,7 +635,7 @@ export default function App() {
         }
       } else if (event.key === 'Escape') {
         setNewPieceDialogOpen(false);
-        setModuleDialogOpen(false);
+        setModuleLibraryOpen(false);
         setEditingDimensionsPieceId(null);
         setDidacticGuideOpen(false);
         setSelectedPieceIds([]);
@@ -899,7 +833,7 @@ export default function App() {
         
         <div className="hidden sm:flex w-[76px] bg-[#15191e] border-r border-[#2a3139] flex-col items-stretch px-2 py-3 gap-2 z-20">
            <ToolbarIcon icon={<Plus />} label="Pieza" title="Crear una pieza (N)" active={false} onClick={addPiece} />
-           <ToolbarIcon icon={<Box />} label="Módulo" title="Crear estante con zócalo" active={false} onClick={openShelfModuleDialog} />
+           <ToolbarIcon icon={<Box />} label="Módulos" title="Abrir biblioteca de módulos" active={false} onClick={openModuleLibrary} />
            <div className="h-px bg-[#303842] my-1" />
            <ToolbarIcon icon={<Undo2 />} label="Deshacer" title="Deshacer (Ctrl+Z)" active={false} disabled={!canUndo} onClick={() => undo()} />
            <ToolbarIcon icon={<Redo2 />} label="Rehacer" title="Rehacer (Ctrl+Shift+Z)" active={false} disabled={!canRedo} onClick={() => redo()} />
@@ -925,7 +859,7 @@ export default function App() {
               ) : (
                 <>
                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  <span className="text-[#aeb7c2]">{pieces.length ? 'Selecciona una pieza para editarla' : 'Crea una pieza o carga el módulo base'}</span>
+                  <span className="text-[#aeb7c2]">{pieces.length ? 'Selecciona una pieza para editarla' : 'Crea una pieza o abre la biblioteca de módulos'}</span>
                 </>
               )}
             </div>
@@ -1011,10 +945,10 @@ export default function App() {
                         <FilePlus2 className="w-6 h-6" />
                       </div>
                       <h2>Empieza tu mueble</h2>
-                      <p>Crea cada tablero en milímetros o abre un módulo listo para modificar.</p>
+                      <p>Crea cada tablero en milímetros o revisa la biblioteca de módulos.</p>
                       <div className="grid grid-cols-2 gap-2">
                         <button type="button" className="cad-primary-button justify-center" onClick={addPiece}><Plus className="w-4 h-4" /> Nueva pieza</button>
-                        <button type="button" className="cad-secondary-button justify-center" onClick={openShelfModuleDialog}><Box className="w-4 h-4" /> Estante con zócalo</button>
+                        <button type="button" className="cad-secondary-button justify-center" onClick={openModuleLibrary}><Box className="w-4 h-4" /> Biblioteca</button>
                       </div>
                     </div>
                   </div>
@@ -1086,7 +1020,7 @@ export default function App() {
              </div>
              <div className="flex items-center gap-2 sm:gap-4">
                <span className="hidden sm:inline">Unidades: milímetros</span>
-               <span className="text-[#cbd3dc]">v0.10</span>
+               <span className="text-[#cbd3dc]">v0.11</span>
              </div>
           </footer>
         </div>
@@ -1114,8 +1048,8 @@ export default function App() {
               <button type="button" className="cad-secondary-button justify-center px-1" onClick={addPiece} title="Crear una pieza">
                 <Plus className="w-4 h-4" /> <span>Pieza</span>
               </button>
-              <button type="button" className="cad-secondary-button justify-center px-1" onClick={openShelfModuleDialog} title="Crear estante con zócalo">
-                <Box className="w-4 h-4" /> <span>Módulo</span>
+              <button type="button" className="cad-secondary-button justify-center px-1" onClick={openModuleLibrary} title="Abrir biblioteca de módulos">
+                <Box className="w-4 h-4" /> <span>Módulos</span>
               </button>
             </div>
 
@@ -1942,114 +1876,82 @@ export default function App() {
         </div>
       )}
 
-      {moduleDialogOpen && (
-        <div className="fixed inset-0 bg-black/65 z-[60] flex items-center justify-center p-3 sm:p-5 backdrop-blur-sm" role="presentation" onMouseDown={() => setModuleDialogOpen(false)}>
-          <form
-            className="cad-modal w-full max-w-3xl max-h-[92dvh] overflow-y-auto"
+      {moduleLibraryOpen && (
+        <div className="fixed inset-0 bg-black/70 z-[60] flex items-center justify-center p-3 sm:p-5 backdrop-blur-sm" role="presentation" onMouseDown={() => setModuleLibraryOpen(false)}>
+          <section
+            className="cad-modal w-full max-w-4xl h-[min(760px,92dvh)] overflow-hidden flex flex-col"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="new-module-title"
+            aria-labelledby="module-library-title"
             onMouseDown={(event) => event.stopPropagation()}
-            onSubmit={(event) => {
-              event.preventDefault();
-              createModuleFromDraft();
-            }}
           >
-            <div className="flex items-start justify-between gap-4 p-5 border-b border-[#303842]">
+            <header className="flex items-start justify-between gap-4 p-4 sm:p-5 border-b border-[#303842] shrink-0">
               <div>
-                <div className="flex items-center gap-2 text-[#f0a144] text-xs font-bold uppercase tracking-wider mb-1"><Box className="w-4 h-4" /> Módulos</div>
-                <h2 id="new-module-title" className="text-xl font-extrabold text-white">Estante paramétrico con zócalo</h2>
-                <p className="text-sm text-[#9aa5b1] mt-1">Genera la estructura, repisas y divisiones lista para el despiece.</p>
+                <div className="flex items-center gap-2 text-[#f0a144] text-xs font-bold uppercase tracking-wider mb-1"><Box className="w-4 h-4" /> Almacén de módulos</div>
+                <h2 id="module-library-title" className="text-xl font-extrabold text-white">Biblioteca de muebles 3D</h2>
+                <p className="text-sm text-[#9aa5b1] mt-1">Organiza aquí los modelos listos que iremos incorporando.</p>
               </div>
-              <button type="button" className="cad-icon-button" onClick={() => setModuleDialogOpen(false)} aria-label="Cerrar">
+              <button type="button" className="cad-icon-button" onClick={() => setModuleLibraryOpen(false)} aria-label="Cerrar biblioteca">
                 <X className="w-5 h-5" />
               </button>
-            </div>
+            </header>
 
-            <div className="p-5 space-y-5">
-              <div>
-                <div className="cad-field-label">Variante inicial</div>
-                <div className="grid grid-cols-3 gap-2">
-                  {SHELF_MODULE_VARIANTS.map(preset => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      className={'cad-orientation-button ' + (moduleDraft.variant === preset.id ? 'is-active' : '')}
-                      onClick={() => setModuleDraft(createShelfModuleDraft(preset.id))}
-                    >
-                      <Box className="w-6 h-6" />
-                      <strong>{preset.label}</strong>
-                      <small>{preset.help}</small>
-                    </button>
-                  ))}
+            <div className="grid md:grid-cols-[270px_minmax(0,1fr)] flex-1 min-h-0">
+              <nav className="border-b md:border-b-0 md:border-r border-[#303842] bg-[#15191e] p-3 overflow-x-auto md:overflow-y-auto" aria-label="Categorías de módulos">
+                <div className="flex md:flex-col gap-2 min-w-max md:min-w-0">
+                  {MODULE_CATEGORIES.map(category => {
+                    const isActive = selectedModuleCategory === category.id;
+                    return (
+                      <button
+                        key={category.id}
+                        type="button"
+                        aria-pressed={isActive}
+                        onClick={() => setSelectedModuleCategory(category.id)}
+                        className={`min-w-[210px] md:min-w-0 w-full rounded-xl border px-3 py-3 text-left flex items-center gap-3 transition-colors ${isActive ? 'border-[#f0a144] bg-[#f0a144]/15 text-white' : 'border-[#303842] bg-[#1b2026] text-[#c5cdd6] hover:border-[#505a66] hover:bg-[#20262d]'}`}
+                      >
+                        <span className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 text-xs font-black tracking-wide ${isActive ? 'bg-[#f0a144] text-[#171b20]' : 'bg-[#29313a] text-[#aeb7c2]'}`}>{category.code}</span>
+                        <span className="min-w-0">
+                          <strong className="block text-sm leading-tight">{category.label}</strong>
+                          <small className="block text-xs text-[#8995a2] mt-1 truncate">{category.description}</small>
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
-              </div>
+              </nav>
 
-              <label className="cad-field">
-                <span>Nombre del módulo</span>
-                <input autoFocus value={moduleDraft.name} onChange={(event) => setModuleDraft(draft => ({ ...draft, name: event.target.value }))} placeholder="Ej. Estante Wayra" />
-              </label>
-
-              <div>
-                <div className="cad-field-label">Medidas exteriores</div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  <MeasurementInput label="Ancho" value={moduleDraft.width} onChange={(value) => setModuleDraft(draft => ({ ...draft, width: value }))} min={300} />
-                  <MeasurementInput label="Alto" value={moduleDraft.height} onChange={(value) => setModuleDraft(draft => ({ ...draft, height: value }))} min={400} />
-                  <MeasurementInput label="Fondo" value={moduleDraft.depth} onChange={(value) => setModuleDraft(draft => ({ ...draft, depth: value }))} min={150} />
-                </div>
-              </div>
-
-              <div>
-                <div className="cad-field-label">Construcción</div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  <MeasurementInput label="Espesor" value={moduleDraft.thickness} onChange={(value) => setModuleDraft(draft => ({ ...draft, thickness: value }))} min={9} />
-                  <MeasurementInput label="Alto zócalo" value={moduleDraft.plinthHeight} onChange={(value) => setModuleDraft(draft => ({ ...draft, plinthHeight: value }))} min={40} />
-                  <MeasurementInput label="Retiro zócalo" value={moduleDraft.plinthInset} onChange={(value) => setModuleDraft(draft => ({ ...draft, plinthInset: value }))} min={0} />
-                  <MeasurementInput label="Repisas" value={moduleDraft.shelves} onChange={(value) => setModuleDraft(draft => ({ ...draft, shelves: value }))} min={0} unit="u." />
-                  <MeasurementInput label="Divisiones verticales" value={moduleDraft.verticalDividers} onChange={(value) => setModuleDraft(draft => ({ ...draft, verticalDividers: value }))} min={0} unit="u." />
-                  <label className="cad-field">
-                    <span>Respaldo</span>
-                    <select value={moduleDraft.back} onChange={(event) => setModuleDraft(draft => ({ ...draft, back: event.target.value as ShelfModuleBack }))}>
-                      <option value="none">Sin respaldo</option>
-                      <option value="mdf3">MDF 3 mm clavado</option>
-                      <option value="melamine18">Melamina del mismo espesor</option>
-                    </select>
-                  </label>
-                </div>
-              </div>
-
-              <label className="cad-field">
-                <span>Material principal</span>
-                <select value={moduleDraft.material} onChange={(event) => setModuleDraft(draft => ({ ...draft, material: event.target.value }))}>
-                  {Object.entries(getGroupedMaterials()).map(([brand, items]) => (
-                    <optgroup key={brand} label={brand}>
-                      {items.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-                    </optgroup>
-                  ))}
-                </select>
-              </label>
-
-              <div className="rounded-xl border border-[#303842] bg-[#11161b] p-4 grid grid-cols-3 gap-3 text-center">
-                <div><div className="text-xl font-extrabold text-white">{moduleDraft.verticalDividers + 1}</div><div className="text-xs text-[#8e99a6]">columnas</div></div>
-                <div><div className="text-xl font-extrabold text-white">{moduleDraft.shelves + 1}</div><div className="text-xs text-[#8e99a6]">espacios altos</div></div>
-                <div>
-                  <div className="text-xl font-extrabold text-[#f0a144]">
-                    {5 + moduleDraft.verticalDividers + moduleDraft.shelves * (moduleDraft.verticalDividers + 1) + (moduleDraft.back === 'none' ? 0 : 1)}
+              <div className="min-h-0 overflow-y-auto p-4 sm:p-6 flex flex-col">
+                <div className="flex items-center justify-between gap-3 pb-4 border-b border-[#303842]">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="w-12 h-12 rounded-xl bg-[#f0a144]/15 border border-[#f0a144]/25 text-[#f0a144] flex items-center justify-center shrink-0 text-sm font-black tracking-wide">{activeModuleCategory.code}</span>
+                    <div className="min-w-0">
+                      <h3 className="text-lg font-extrabold text-white truncate">{activeModuleCategory.label}</h3>
+                      <p className="text-sm text-[#929daa] truncate">{activeModuleCategory.description}</p>
+                    </div>
                   </div>
-                  <div className="text-xs text-[#8e99a6]">piezas</div>
+                  <span className="rounded-full border border-[#3a434d] bg-[#171c22] px-3 py-1 text-xs font-bold text-[#aeb7c2] shrink-0">0 modelos</span>
+                </div>
+
+                <div className="flex-1 min-h-[260px] flex items-center justify-center py-8">
+                  <div className="max-w-md text-center">
+                    <div className="w-16 h-16 rounded-2xl bg-[#20262d] border border-[#343d47] text-[#7f8b98] flex items-center justify-center mx-auto mb-4">
+                      <FilePlus2 className="w-7 h-7" />
+                    </div>
+                    <h4 className="text-lg font-extrabold text-white">Esta categoría está vacía</h4>
+                    <p className="text-sm leading-relaxed text-[#929daa] mt-2">Cuando me entregues un modelo 3D listo de {activeModuleCategory.label.toLowerCase()}, lo añadiremos aquí y definiremos sus opciones paso a paso.</p>
+                    <div className="mt-5 rounded-xl border border-[#f0a144]/20 bg-[#f0a144]/10 px-4 py-3 text-sm text-[#d5bd98]">
+                      Por ahora, elegir una categoría no crea piezas ni modifica el proyecto.
+                    </div>
+                  </div>
                 </div>
               </div>
-
-              <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
-                Solo estructura abierta: no se crearán puertas ni cajones. Las repisas se separan por columnas para evitar cruces con las divisiones verticales.
-              </div>
             </div>
 
-            <div className="p-4 sm:p-5 bg-[#15191e] border-t border-[#303842] flex flex-col-reverse sm:flex-row justify-end gap-2">
-              <button type="button" className="cad-secondary-button justify-center" onClick={() => setModuleDialogOpen(false)}>Cancelar</button>
-              <button type="submit" className="cad-primary-button justify-center"><Box className="w-4 h-4" /> Crear estante</button>
-            </div>
-          </form>
+            <footer className="p-3 sm:px-5 sm:py-4 bg-[#15191e] border-t border-[#303842] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+              <p className="text-xs sm:text-sm text-[#8f9aa6]">6 categorías iniciales · Preparado para añadir más sobre la marcha.</p>
+              <button type="button" className="cad-secondary-button justify-center" onClick={() => setModuleLibraryOpen(false)}>Cerrar</button>
+            </footer>
+          </section>
         </div>
       )}
 
