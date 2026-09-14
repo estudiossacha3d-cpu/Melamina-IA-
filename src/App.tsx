@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, Ruler, Play, Pointer, Undo2, Redo2, CheckCircle2, Scissors, PanelRightOpen, FilePlus2 } from 'lucide-react';
+import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, Ruler, Undo2, Redo2, CheckCircle2, Scissors, PanelRightOpen, FilePlus2 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 import { interpretFurnitureImage, isAiConfigured } from './lib/gemini';
@@ -45,6 +45,15 @@ interface AppState {
   pieces: Piece[];
   groups: Group3D[];
 }
+
+const stripLegacyPieceMetadata = (project: AppState): AppState => ({
+  pieces: project.pieces.map(piece => {
+    const staticPiece = { ...piece } as Piece & Record<string, unknown>;
+    delete staticPiece[['dyna', 'mic'].join('')];
+    return staticPiece as Piece;
+  }),
+  groups: project.groups,
+});
 
 function useAppHistory(initialState: AppState) {
   const [state, setStateInternal] = useState<AppState>(initialState);
@@ -176,7 +185,7 @@ export default function App() {
     try {
       const savedProject = window.localStorage.getItem(PROJECT_STORAGE_KEY);
       const parsedProject = savedProject ? JSON.parse(savedProject) : null;
-      initialStateRef.current = isProjectState(parsedProject) ? parsedProject : createStarterProject();
+      initialStateRef.current = isProjectState(parsedProject) ? stripLegacyPieceMetadata(parsedProject) : createStarterProject();
     } catch {
       initialStateRef.current = createStarterProject();
     }
@@ -285,12 +294,9 @@ export default function App() {
   const [trayOpen, setTrayOpen] = useState({
     esquema: true,
     entidad: true,
-    dinamico: false,
     materiales: false,
     procesos: false,
   });
-  
-  const [interactMode, setInteractMode] = useState(false);
 
   useEffect(() => {
     window.localStorage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(appState));
@@ -315,73 +321,6 @@ export default function App() {
   };
   
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleToggleDynamicPiece = (id: string) => {
-    setPieces(prev => prev.map(p => {
-      if (p.id === id && p.dynamic) {
-        return {
-          ...p,
-          dynamic: {
-            ...p.dynamic,
-            isOpen: !p.dynamic.isOpen
-          }
-        };
-      }
-      return p;
-    }));
-  };
-
-  const handleToggleAllDynamicPieces = (targetState?: boolean) => {
-    setPieces(prev => {
-      const hasAnyOpen = prev.some(p => p.dynamic?.isOpen);
-      const nextOpen = targetState !== undefined ? targetState : !hasAnyOpen;
-      return prev.map(p => {
-        if (p.dynamic) {
-          return {
-            ...p,
-            dynamic: {
-              ...p.dynamic,
-              isOpen: nextOpen
-            }
-          };
-        }
-        return p;
-      });
-    });
-  };
-
-  const handleAutoTagDynamicPieces = () => {
-    setPieces(prev => prev.map(p => {
-      if (p.dynamic) return p;
-      const name = (p.name || '').toLowerCase();
-      if (name.includes('puerta') || name.includes('door') || name.includes('frente p')) {
-        const isRight = name.includes('derecha') || name.includes('der') || name.includes('right');
-        const isLift = name.includes('elevable') || name.includes('basculante') || name.includes('lift') || name.includes('sup');
-        return {
-          ...p,
-          abisagrado: true,
-          dynamic: {
-            type: 'door',
-            doorType: isLift ? 'lift_up' : isRight ? 'single_right' : 'single_left',
-            pivotPoint: isLift ? 'top' : isRight ? 'right' : 'left',
-            openAngle: 95,
-            isOpen: false
-          }
-        };
-      } else if (name.includes('cajon') || name.includes('cajón') || name.includes('drawer') || name.includes('frente c')) {
-        return {
-          ...p,
-          dynamic: {
-            type: 'drawer',
-            slideAxis: 'Z',
-            slideDistance: Math.max(200, Math.round(p.ancho * 0.85)),
-            isOpen: false
-          }
-        };
-      }
-      return p;
-    }));
-  };
 
   const [tempLargo, setTempLargo] = useState<number>(0);
   const [tempAncho, setTempAncho] = useState<number>(0);
@@ -721,10 +660,11 @@ export default function App() {
           showNotice('El archivo no contiene un proyecto CAD válido');
           return;
         }
-        setAppState(normalized);
+        const staticProject = stripLegacyPieceMetadata(normalized);
+        setAppState(staticProject);
         setSelectedPieceIds([]);
         setViewMode('3d');
-        showNotice(`Proyecto abierto: ${normalized.pieces.length} piezas`);
+        showNotice(`Proyecto abierto: ${staticProject.pieces.length} piezas`);
       } catch (err) {
         console.error("Failed to parse JSON", err);
         showNotice('No se pudo abrir el archivo JSON');
@@ -1063,8 +1003,6 @@ export default function App() {
                   onDoubleClickPiece={(id) => handleOpenDimensionEditor(id, 'largo')}
                   onEditDimensionAxis={(id, axis) => handleOpenDimensionEditor(id, axis)}
                   hide3DLabels={!!editingDimensionsPieceId || didacticGuideOpen}
-                  interactMode={interactMode}
-                  onToggleDynamicPiece={handleToggleDynamicPiece}
                 />
                 {pieces.length === 0 && (
                   <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none p-5">
@@ -1112,9 +1050,6 @@ export default function App() {
                   canUndo={canUndo}
                   canRedo={canRedo}
                   onOpenProperties={() => setMobileMenuOpen(true)}
-                  interactMode={interactMode}
-                  onToggleInteractMode={() => setInteractMode(!interactMode)}
-                  onToggleAllDynamicPieces={handleToggleAllDynamicPieces}
                 />
               </>
             ) : (
@@ -1137,7 +1072,7 @@ export default function App() {
                {activeDisplacement ? (
                  <div className="flex items-center gap-2 font-mono bg-[#0e1115] px-2 py-1 rounded-lg border border-[#f0a144]/50 text-[#f0a144]">
                    <span className="font-bold">
-                     Movimiento: <span className="text-white font-black">{activeDisplacement.dist} mm</span>
+                     Desplazamiento: <span className="text-white font-black">{activeDisplacement.dist} mm</span>
                    </span>
                    <span className="text-[#b9c2cc] hidden sm:flex items-center gap-1.5 border-l border-[#3a424d] pl-2">
                      <span className="text-red-400 font-bold">ΔX: {activeDisplacement.dx > 0 ? `+${activeDisplacement.dx}` : activeDisplacement.dx}</span>
@@ -1151,7 +1086,7 @@ export default function App() {
              </div>
              <div className="flex items-center gap-2 sm:gap-4">
                <span className="hidden sm:inline">Unidades: milímetros</span>
-               <span className="text-[#cbd3dc]">v0.9</span>
+               <span className="text-[#cbd3dc]">v0.10</span>
              </div>
           </footer>
         </div>
@@ -1981,171 +1916,7 @@ export default function App() {
                 )}
               </div>
 
-              {/* Puertas y cajones interactivos */}
-              <div className="flex flex-col">
-                <div 
-                  onClick={() => toggleTray('dinamico')}
-                  className="h-7 bg-[#262626] hover:bg-[#2d2d2d] flex items-center justify-between px-2 cursor-pointer select-none transition-colors border-t border-[#3c3c3c]/30 border-b border-[#151515]"
-                >
-                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-[#dddddd] uppercase tracking-wider">
-                    {trayOpen.dinamico ? (
-                      <ChevronDown className="w-3.5 h-3.5 text-purple-400" />
-                    ) : (
-                      <ChevronRight className="w-3.5 h-3.5 text-[#888888]" />
-                    )}
-                    <span className="text-purple-300">Puertas y cajones</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-[13px] font-mono text-purple-400 font-bold bg-purple-950/40 px-1 py-0.5 rounded border border-purple-500/30">MOVIMIENTO</span>
-                  </div>
-                </div>
 
-                {trayOpen.dinamico && (
-                  <div className="bg-[#1e1e1e] p-3 text-[12px] text-[#ccc] space-y-2.5 animate-in fade-in duration-100">
-                    {/* Global Actions */}
-                    <div className="flex items-center gap-1.5 bg-purple-950/30 p-1.5 rounded border border-purple-500/20">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleAllDynamicPieces()}
-                        className="flex-1 bg-purple-900/80 hover:bg-purple-800 text-purple-100 py-1 rounded text-[12px] font-bold flex items-center justify-center gap-1 transition-all shadow active:scale-95 cursor-pointer"
-                      >
-                        <Play className="w-2.5 h-2.5 fill-current" />
-                        <span>Probar mueble</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleAutoTagDynamicPieces}
-                        className="px-2 py-1 bg-[#2d2d2d] hover:bg-[#3d3d3d] text-purple-300 rounded text-[11px] font-bold transition-colors border border-[#3c3c3c] cursor-pointer"
-                        title="Auto-Detectar componentes basándose en nombres (Puertas / Cajones)"
-                      >
-                        Detectar por nombre
-                      </button>
-                    </div>
-
-                    {selectedPieceIds.length > 0 ? (
-                      (() => {
-                        const activePiece = pieces.find(p => p.id === selectedPieceIds[0]);
-                        if (!activePiece) return null;
-                        const dyn = activePiece.dynamic;
-
-                        return (
-                          <div className="space-y-2 pt-1 border-t border-[#2a2a2a]">
-                            <div className="flex flex-col gap-1">
-                              <label className="text-[13px] font-bold text-purple-400 uppercase tracking-wider">
-                                Movimiento de la pieza
-                              </label>
-                              <select
-                                value={dyn ? (dyn.type === 'door' ? (dyn.doorType || 'single_left') : 'drawer') : 'none'}
-                                onChange={(e) => {
-                                  const val = e.target.value;
-                                  if (val === 'none') {
-                                    updatePiece(activePiece.id, { dynamic: undefined });
-                                  } else if (val === 'drawer') {
-                                    updatePiece(activePiece.id, {
-                                      dynamic: {
-                                        type: 'drawer',
-                                        slideAxis: 'Z',
-                                        slideDistance: Math.max(200, Math.round(activePiece.ancho * 0.85)),
-                                        isOpen: false
-                                      }
-                                    });
-                                  } else {
-                                    const isLift = val === 'lift_up';
-                                    const isRight = val === 'single_right';
-                                    updatePiece(activePiece.id, {
-                                      abisagrado: true,
-                                      dynamic: {
-                                        type: 'door',
-                                        doorType: val as any,
-                                        pivotPoint: isLift ? 'top' : isRight ? 'right' : 'left',
-                                        openAngle: 95,
-                                        isOpen: false
-                                      }
-                                    });
-                                  }
-                                }}
-                                className="bg-[#111111] border border-purple-500/40 text-purple-200 text-[12px] font-bold px-2 py-1 rounded outline-none w-full focus:border-purple-400 cursor-pointer"
-                              >
-                                <option value="none">⚪ Estático (Pieza Fija)</option>
-                                <option value="single_left">🚪 Puerta Batiente Izquierda (Bisagra Izq)</option>
-                                <option value="single_right">🚪 Puerta Batiente Derecha (Bisagra Der)</option>
-                                <option value="lift_up">🚪 Puerta Elevable Basculante (Bisagra Superior)</option>
-                                <option value="drawer">🗄️ Cajón Deslizante (Corredera Riel Z)</option>
-                              </select>
-                            </div>
-
-                            {dyn && (
-                              <div className="bg-[#141414] border border-purple-500/30 p-2 rounded space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[11px] font-black text-purple-300 uppercase">
-                                    Estado Actual: <span className={dyn.isOpen ? 'text-green-400 font-bold' : 'text-gray-400'}>{dyn.isOpen ? 'ABIERTO' : 'CERRADO'}</span>
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleToggleDynamicPiece(activePiece.id)}
-                                    className={`px-2.5 py-1 rounded text-[13px] font-bold transition-all shadow cursor-pointer ${
-                                      dyn.isOpen 
-                                        ? 'bg-amber-600/80 hover:bg-amber-500 text-white' 
-                                        : 'bg-purple-700/80 hover:bg-purple-600 text-white'
-                                    }`}
-                                  >
-                                    {dyn.isOpen ? 'Cerrar' : 'Abrir ⚡'}
-                                  </button>
-                                </div>
-
-                                {dyn.type === 'door' ? (
-                                  <div className="flex flex-col gap-1">
-                                    <div className="flex justify-between items-center text-[13px] font-bold text-[#888]">
-                                      <span>ÁNGULO MÁXIMO DE APERTURA:</span>
-                                      <span className="text-purple-300 font-mono">{dyn.openAngle ?? 95}°</span>
-                                    </div>
-                                    <input
-                                      type="range"
-                                      min="30"
-                                      max="170"
-                                      step="5"
-                                      value={dyn.openAngle ?? 95}
-                                      onChange={(e) => {
-                                        const angle = parseInt(e.target.value);
-                                        updatePiece(activePiece.id, {
-                                          dynamic: { ...dyn, openAngle: angle }
-                                        });
-                                      }}
-                                      className="w-full h-1 bg-[#2e2e2e] rounded-lg cursor-pointer appearance-none accent-purple-400"
-                                    />
-                                  </div>
-                                ) : (
-                                  <div className="flex flex-col gap-1">
-                                    <div className="flex justify-between items-center text-[13px] font-bold text-[#888]">
-                                      <span>DISTANCIA DE APERTURA (RIEL):</span>
-                                      <span className="text-purple-300 font-mono">{dyn.slideDistance ?? 350} mm</span>
-                                    </div>
-                                    <input
-                                      type="number"
-                                      value={dyn.slideDistance ?? 350}
-                                      onChange={(e) => {
-                                        const dist = parseInt(e.target.value) || 200;
-                                        updatePiece(activePiece.id, {
-                                          dynamic: { ...dyn, slideDistance: dist }
-                                        });
-                                      }}
-                                      className="bg-[#1e1e1e] border border-[#333] text-[12px] font-mono text-center text-white py-0.5 rounded outline-none w-full focus:border-purple-400"
-                                    />
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })()
-                    ) : (
-                      <div className="text-center text-[12px] text-[#666] py-2 italic">
-                        Selecciona una pieza para asignarle atributos de Puerta o Cajón Dinámico
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
 
             </div>
           </aside>

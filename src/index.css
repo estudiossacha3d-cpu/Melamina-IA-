@@ -363,7 +363,6 @@ textarea:focus-visible {
   font-weight: 800;
 }
 .viewport-chip.is-blue { color: #93c5fd; border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.09); }
-.viewport-chip.is-purple { color: #d8b4fe; border-color: rgba(168, 85, 247, 0.3); background: rgba(168, 85, 247, 0.09); }
 
 .rotation-axis-button {
   width: 30px;
