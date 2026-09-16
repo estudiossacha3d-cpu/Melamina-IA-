@@ -6,8 +6,7 @@ import {
   Maximize2, Minimize2, LayoutList, Table, Rows, Grid, Search, ChevronUp, ChevronDown, 
   Check, Layers3, Sun, Moon, FlipHorizontal, Printer, Download, Eye, EyeOff, Hash, GripHorizontal
 } from 'lucide-react';
-import { sheetGroupKey } from '../lib/project';
-import { professionalPack as professionalPackCore } from '../lib/cutOptimizer';
+import { buildMaterialReport } from '../lib/materialReport';
 
 interface CutPlanViewerProps {
   pieces: Piece[];
@@ -18,205 +17,6 @@ interface CutPlanViewerProps {
   updatePiece: (id: string, updates: Partial<Piece>) => void;
   onConsolidatePieces?: () => void;
   setPieces?: React.Dispatch<React.SetStateAction<Piece[]>>;
-}
-
-export interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  id: string;
-  name: string;
-  rotated: boolean;
-  cutIndex: number;
-  cantos: EdgeConfig;
-  material?: string;
-  espesor?: number;
-}
-
-export interface WasteRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  isMargin?: boolean;
-}
-
-export interface PackedBoard {
-  boardIndex: number;
-  rects: Rect[];
-  wasteRects: WasteRect[];
-  stats: {
-    efficiency: number;
-    areaUsed: number;
-    totalArea: number;
-  };
-}
-
-// Professional Packing Algorithm: Guillotine with First-Fit Decreasing
-export function professionalPack(
-  pieces: Piece[], 
-  config: SheetConfig
-): { 
-  boards: PackedBoard[];
-  stats: { efficiency: number; areaUsed: number; totalArea: number; boardsCount: number };
-} {
-  const { width, height, kerf, margin } = config;
-  const usableW = width - (margin * 2);
-  const usableH = height - (margin * 2);
-
-  // Flatten pieces based on quantity
-  const flatPieces: { 
-    w: number; 
-    h: number; 
-    id: string; 
-    name: string; 
-    veta: boolean; 
-    cantos: EdgeConfig; 
-    material?: string; 
-    espesor?: number;
-  }[] = [];
-
-  pieces.forEach(p => {
-    for (let i = 0; i < p.cantidad; i++) {
-      flatPieces.push({ 
-        w: p.largo, 
-        h: p.ancho, 
-        id: p.id, 
-        name: p.name,
-        veta: !!p.veta,
-        cantos: p.cantos || { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' },
-        material: p.material || 'MELAMINA',
-        espesor: p.espesor || 18
-      });
-    }
-  });
-
-  // Sort by area decreasing
-  flatPieces.sort((a, b) => (b.w * b.h) - (a.w * a.h));
-
-  const boards: PackedBoard[] = [];
-  let areaUsed = 0;
-
-  const currentPieces = [...flatPieces];
-
-  while (currentPieces.length > 0) {
-    const boardRects: Rect[] = [];
-    const spaces: { x: number; y: number; w: number; h: number }[] = [
-      { x: margin, y: margin, w: usableW, h: usableH }
-    ];
-
-    for (let i = 0; i < currentPieces.length; i++) {
-      const item = currentPieces[i];
-      let spaceIdx = -1;
-      let rotated = false;
-
-      // Find first space that fits
-      for (let j = 0; j < spaces.length; j++) {
-        const s = spaces[j];
-        // Normal fit
-        if (item.w <= s.w && item.h <= s.h) {
-          spaceIdx = j;
-          rotated = false;
-          break;
-        }
-        // Rotated fit (if no veta constraint)
-        if (!item.veta && item.h <= s.w && item.w <= s.h) {
-          spaceIdx = j;
-          rotated = true;
-          break;
-        }
-      }
-
-      if (spaceIdx !== -1) {
-        const space = spaces[spaceIdx];
-        const pw = rotated ? item.h : item.w;
-        const ph = rotated ? item.w : item.h;
-
-        boardRects.push({
-          x: space.x,
-          y: space.y,
-          w: pw,
-          h: ph,
-          id: item.id,
-          name: item.name,
-          rotated,
-          cutIndex: boardRects.length + 1,
-          cantos: item.cantos,
-          material: item.material,
-          espesor: item.espesor
-        });
-
-        areaUsed += pw * ph;
-
-        // Split space (Guillotine cut)
-        const remainingW = space.w - pw - kerf;
-        const remainingH = space.h - ph - kerf;
-
-        spaces.splice(spaceIdx, 1);
-
-        if (remainingW > 0 && ph > 0) {
-          spaces.push({ x: space.x + pw + kerf, y: space.y, w: remainingW, h: ph });
-        }
-        if (remainingH > 0 && space.w > 0) {
-          spaces.push({ x: space.x, y: space.y + ph + kerf, w: space.w, h: remainingH });
-        }
-
-        spaces.sort((a, b) => (a.y === b.y) ? a.x - b.x : a.y - b.y);
-
-        currentPieces.splice(i, 1);
-        i--;
-      }
-    }
-
-    if (boardRects.length === 0 && currentPieces.length > 0) {
-      currentPieces.shift();
-      continue;
-    }
-
-    // Collect remaining unallocated spaces as waste (desechos)
-    const wasteRects: WasteRect[] = [];
-    if (margin > 0) {
-      wasteRects.push({ x: 0, y: 0, w: width, h: margin, isMargin: true });
-      wasteRects.push({ x: 0, y: height - margin, w: width, h: margin, isMargin: true });
-      wasteRects.push({ x: 0, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
-      wasteRects.push({ x: width - margin, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
-    }
-
-    spaces.forEach(s => {
-      if (s.w > 2 && s.h > 2) {
-        wasteRects.push({ x: s.x, y: s.y, w: s.w, h: s.h, isMargin: false });
-      }
-    });
-
-    const boardAreaUsed = boardRects.reduce((acc, r) => acc + (r.w * r.h), 0);
-    const boardTotalArea = width * height;
-    const boardEfficiency = boardTotalArea > 0 ? (boardAreaUsed / boardTotalArea) * 100 : 0;
-
-    boards.push({
-      boardIndex: boards.length + 1,
-      rects: boardRects,
-      wasteRects,
-      stats: {
-        efficiency: boardEfficiency,
-        areaUsed: boardAreaUsed,
-        totalArea: boardTotalArea
-      }
-    });
-  }
-
-  const totalArea = boards.length * width * height;
-  const efficiency = totalArea > 0 ? (areaUsed / totalArea) * 100 : 0;
-
-  return { 
-    boards, 
-    stats: { 
-      efficiency, 
-      areaUsed, 
-      totalArea, 
-      boardsCount: boards.length 
-    } 
-  };
 }
 
 export default function CutPlanViewer({ 
@@ -237,6 +37,8 @@ export default function CutPlanViewer({
   const [pieceSearch, setPieceSearch] = useState('');
   const [pieceListExpanded, setPieceListExpanded] = useState(false);
   const [mobileTab, setMobileTab] = useState<'boards' | 'list' | 'both'>('boards');
+  const [showMaterialReport, setShowMaterialReport] = useState(() => window.innerWidth >= 768);
+  const [showViewOptions, setShowViewOptions] = useState(false);
 
   // Quantity to rotate map state per piece row
   const [rotateQtyMap, setRotateQtyMap] = useState<Record<string, number>>({});
@@ -301,87 +103,23 @@ export default function CutPlanViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   
-  const { boardGroups, totalStats, unplacedPieces } = useMemo(() => {
-    // A physical sheet can only contain one material/colour and one thickness.
-    const sheetGroups: Record<string, Piece[]> = {};
-    pieces.forEach(p => {
-      const key = sheetGroupKey(p);
-      if (!sheetGroups[key]) sheetGroups[key] = [];
-      sheetGroups[key].push(p);
-    });
+  const materialReport = useMemo(
+    () => buildMaterialReport(pieces, sheetConfig),
+    [pieces, sheetConfig],
+  );
+  const boardGroups = materialReport.groups;
+  const totalStats = materialReport.totals;
+  const unplacedPieces = materialReport.unplacedPieces;
+  const edgebandingTotals = {
+    thin: totalStats.thinEdgeM.toFixed(2),
+    thick: totalStats.thickEdgeM.toFixed(2),
+  };
 
-    const results: { thickness: number, material: string, boards: PackedBoard[], stats: any, config: SheetConfig, unplaced: string[] }[] = [];
-    let combinedAreaUsed = 0;
-    let combinedTotalArea = 0;
-    let combinedBoardsCount = 0;
-
-    Object.values(sheetGroups).forEach(groupPieces => {
-      const firstPiece = groupPieces[0];
-      const thickness = firstPiece.espesor || 18;
-      const material = firstPiece.material || 'Blanco';
-      
-      let groupConfig = { ...sheetConfig };
-      if (thickness === 3) {
-        groupConfig = { ...sheetConfig, width: 2440, height: 1850 };
-      }
-
-      const packed = professionalPackCore(groupPieces, groupConfig);
-      
-      results.push({
-        thickness,
-        material,
-        boards: packed.boards,
-        stats: packed.stats,
-        config: groupConfig,
-        unplaced: packed.unplaced,
-      });
-
-      combinedAreaUsed += packed.stats.areaUsed;
-      combinedTotalArea += packed.stats.totalArea;
-      combinedBoardsCount += packed.stats.boardsCount;
-    });
-
-    const efficiency = combinedTotalArea > 0 ? (combinedAreaUsed / combinedTotalArea) * 100 : 0;
-
-    return { 
-      boardGroups: results, 
-      unplacedPieces: results.flatMap(result => result.unplaced),
-      totalStats: {
-        efficiency,
-        areaUsed: combinedAreaUsed,
-        totalArea: combinedTotalArea,
-        boardsCount: combinedBoardsCount
-      }
-    };
-  }, [pieces, sheetConfig]);
-
-  const edgebandingTotals = useMemo(() => {
-    let thin = 0;
-    let thick = 0;
-    
-    pieces.forEach(p => {
-      const qty = p.cantidad;
-      const { largo, ancho, cantos } = p;
-      if (!cantos) return;
-      
-      const edges = [
-        { type: cantos.largo1, length: largo },
-        { type: cantos.largo2, length: largo },
-        { type: cantos.ancho1, length: ancho },
-        { type: cantos.ancho2, length: ancho }
-      ];
-
-      edges.forEach(e => {
-        if (e.type === 'Canto Delgado') thin += e.length * qty;
-        else if (e.type === 'Canto Grueso') thick += e.length * qty;
-      });
-    });
-
-    return {
-      thin: (thin / 1000).toFixed(2),
-      thick: (thick / 1000).toFixed(2)
-    };
-  }, [pieces]);
+  useEffect(() => {
+    if (selectedBoardFilter !== 'all' && selectedBoardFilter >= totalStats.boardsCount) {
+      setSelectedBoardFilter('all');
+    }
+  }, [selectedBoardFilter, totalStats.boardsCount]);
 
   const [viewScale, setViewScale] = useState(0.18);
 
@@ -561,11 +299,11 @@ export default function CutPlanViewer({
 
   if (pieces.length === 0) {
     return (
-      <div className="absolute inset-0 bg-[#393939] flex items-center justify-center">
+      <div className="absolute inset-0 bg-[#16191d] flex items-center justify-center px-6">
         <div className="text-center group">
-          <Layers className="w-12 h-12 text-[#222222] mx-auto mb-4 group-hover:text-[#f0a144]/50 transition-colors" />
-          <p className="text-[#d9e0e7] font-bold text-base">Todavía no hay piezas para cortar</p>
-          <p className="text-[#8e99a6] text-sm mt-2">Vuelve a Diseño 3D y crea una pieza o carga el módulo base.</p>
+          <Layers className="w-10 h-10 text-[#f0a144]/35 mx-auto mb-4 group-hover:text-[#f0a144]/60 transition-colors" />
+          <p className="text-[#eef2f6] font-semibold text-base">Todavía no hay piezas para cortar</p>
+          <p className="text-[#89939f] text-sm mt-2">Vuelve a Diseño 3D y crea una pieza o abre la biblioteca de módulos.</p>
         </div>
       </div>
     );
@@ -574,13 +312,13 @@ export default function CutPlanViewer({
   const isLightCAD = cadTheme === 'light';
 
   return (
-    <div className="absolute inset-0 bg-[#282828] flex flex-col overflow-hidden w-full max-w-full font-sans">
+    <div className="absolute inset-0 bg-[#16191d] flex flex-col overflow-hidden w-full max-w-full font-sans">
       {/* Top Header */}
-      <div className="h-12 sm:h-14 border-b border-[#1e1e1e] bg-[#222222] flex items-center justify-between px-2 sm:px-4 shrink-0 shadow-lg relative z-20 w-full max-w-full overflow-hidden">
+      <div className="h-12 sm:h-14 border-b border-white/10 bg-[#171a1f] flex items-center justify-between px-2 sm:px-4 shrink-0 relative z-20 w-full max-w-full overflow-hidden">
         <div className="flex items-center gap-2 sm:gap-4 overflow-x-auto no-scrollbar py-1 min-w-0">
           <div className="flex items-center gap-1.5 shrink-0">
             <Scissors className="w-4 h-4 text-[#f0a144]" />
-            <h2 className="text-[12px] sm:text-[13px] font-bold text-white uppercase tracking-widest hidden sm:block">Optimización de corte</h2>
+            <h2 className="text-[12px] sm:text-sm font-semibold text-white tracking-wide hidden sm:block">Corte 2D</h2>
           </div>
           
           {/* Mobile Main Tab Switcher */}
@@ -608,65 +346,47 @@ export default function CutPlanViewer({
             </button>
           </div>
 
-          <div className="hidden sm:block h-4 w-px bg-[#444444] mx-1 shrink-0"></div>
+          <div className="hidden sm:block h-4 w-px bg-white/10 mx-1 shrink-0"></div>
 
-          {/* Layout Mode Selector */}
-          <div className="hidden sm:flex items-center bg-[#181818] border border-[#333333] p-0.5 rounded-lg shrink-0">
-            <button
-              onClick={() => setLayoutMode('vertical')}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[12px] font-bold uppercase transition-colors ${layoutMode === 'vertical' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
-              title="Disposición Vertical"
-            >
-              <Rows className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">Vertical</span>
-            </button>
-            <button
-              onClick={() => setLayoutMode('grid')}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[12px] font-bold uppercase transition-colors ${layoutMode === 'grid' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
-              title="Disposición en Cuadrícula"
-            >
-              <Grid className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">Cuadrícula</span>
-            </button>
-            <button
-              onClick={() => setLayoutMode('horizontal')}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded text-[12px] font-bold uppercase transition-colors ${layoutMode === 'horizontal' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
-              title="Disposición Horizontal Side-by-Side"
-            >
-              <LayoutList className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">Horizontal</span>
-            </button>
-          </div>
-
-          <div className="hidden sm:block h-4 w-px bg-[#444444] mx-1 shrink-0"></div>
-
-          {/* Quick Metrics Bar */}
-          <div className="hidden sm:flex gap-2 sm:gap-4 shrink-0 items-center">
+          <div className="hidden sm:flex gap-3 lg:gap-5 shrink-0 items-center">
             <div className="flex flex-col">
-              <span className="text-[11px] sm:text-[11px] text-[#aaaaaa] uppercase tracking-tighter">Efic. Total</span>
-              <span className={`text-[12px] sm:text-xs font-mono font-bold ${totalStats.efficiency > 85 ? 'text-emerald-400' : totalStats.efficiency > 70 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
+              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Piezas</span>
+              <span className="text-xs font-mono font-semibold text-white">{totalStats.piecesCount}</span>
+            </div>
+            <div className="hidden md:flex flex-col">
+              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Materiales</span>
+              <span className="text-xs font-mono font-semibold text-white">{totalStats.materialGroups}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Planchas</span>
+              <span className="text-xs font-mono font-semibold text-white">{totalStats.boardsCount}</span>
+            </div>
+            <div className="hidden lg:flex flex-col">
+              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Rendimiento</span>
+              <span className={`text-xs font-mono font-semibold ${totalStats.efficiency >= 80 ? 'text-emerald-400' : totalStats.efficiency >= 65 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
                 {totalStats.efficiency.toFixed(1)}%
               </span>
-            </div>
-            <div className="flex flex-col">
-              <span className="text-[11px] sm:text-[11px] text-[#aaaaaa] uppercase tracking-tighter">Planchas</span>
-              <span className="text-[12px] sm:text-xs font-mono font-bold text-white">{totalStats.boardsCount}</span>
-            </div>
-            <div className="flex flex-col hidden xs:flex">
-              <span className="text-[11px] sm:text-[11px] text-[#aaaaaa] uppercase tracking-tighter">Área Útil</span>
-              <span className="text-[12px] sm:text-xs font-mono font-bold text-[#cccccc]">{(totalStats.areaUsed / 1000000).toFixed(2)}m²</span>
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowMaterialReport(value => !value)}
+            className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${showMaterialReport ? 'bg-[#f0a144]/15 border border-[#f0a144]/50 text-[#f7b766]' : 'bg-white/[0.03] border border-white/10 text-[#aab2bc] hover:text-white'}`}
+            aria-expanded={showMaterialReport}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span className="hidden xs:inline">Materiales</span>
+          </button>
           <button 
             type="button"
             onClick={() => setShowSettings(!showSettings)}
-            className={`flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 rounded text-[12px] sm:text-[12px] font-bold uppercase transition-all shrink-0 ${showSettings ? 'bg-[#f0a144] text-black shadow-lg font-black' : 'bg-[#181818] border border-[#333333] text-[#aaaaaa] hover:bg-[#333333] hover:text-white'}`}
+            className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shrink-0 ${showSettings ? 'bg-[#f0a144] text-black' : 'bg-white/[0.03] border border-white/10 text-[#aab2bc] hover:text-white'}`}
           >
             <Settings className={`w-3.5 h-3.5 ${showSettings ? 'animate-spin-slow' : ''}`} />
-            <span className="hidden sm:inline">Ajustes</span>
+            <span className="hidden xs:inline">Ajustes</span>
           </button>
         </div>
       </div>
@@ -679,6 +399,90 @@ export default function CutPlanViewer({
             <div className="text-[13px] text-rose-200/75 truncate mt-0.5">{unplacedPieces.join(' · ')}</div>
           </div>
         </div>
+      )}
+
+      {showMaterialReport && (
+        <section className="shrink-0 max-h-[42vh] overflow-auto bg-[#13161a] border-b border-white/10 px-3 sm:px-4 py-3" aria-label="Cálculo de materiales">
+          <div className="flex items-center justify-between gap-4 mb-3">
+            <div>
+              <h3 className="text-sm font-semibold text-white">Cálculo de materiales</h3>
+              <p className="text-[11px] text-[#7f8995] mt-0.5">Compra estimada según material, color y espesor.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowMaterialReport(false)}
+              className="text-[11px] font-medium text-[#89939f] hover:text-white transition-colors"
+            >
+              Ocultar
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
+            {[
+              { label: 'Área de piezas', value: `${totalStats.requiredAreaM2.toFixed(2)} m²` },
+              { label: 'Área a comprar', value: `${totalStats.purchaseAreaM2.toFixed(2)} m²` },
+              { label: 'Merma estimada', value: `${totalStats.wasteAreaM2.toFixed(2)} m²` },
+              { label: 'Cantos', value: `${(totalStats.thinEdgeM + totalStats.thickEdgeM).toFixed(2)} m` },
+            ].map(metric => (
+              <div key={metric.label} className="rounded-lg border border-white/[0.08] bg-white/[0.025] px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wider text-[#727d89]">{metric.label}</div>
+                <div className="mt-0.5 text-sm font-mono font-semibold text-[#edf1f5]">{metric.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="overflow-x-auto rounded-lg border border-white/[0.08]">
+            <table className="w-full min-w-[880px] text-left text-[11px]">
+              <thead className="bg-white/[0.035] text-[#7f8995] uppercase tracking-wider">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Material</th>
+                  <th className="px-3 py-2 font-medium">Espesor</th>
+                  <th className="px-3 py-2 font-medium">Formato</th>
+                  <th className="px-3 py-2 font-medium text-right">Piezas</th>
+                  <th className="px-3 py-2 font-medium text-right">Planchas</th>
+                  <th className="px-3 py-2 font-medium text-right">Área piezas</th>
+                  <th className="px-3 py-2 font-medium text-right">Área compra</th>
+                  <th className="px-3 py-2 font-medium text-right">Merma</th>
+                  <th className="px-3 py-2 font-medium text-right">Rendimiento</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.06] text-[#c9d0d8]">
+                {boardGroups.map(group => (
+                  <tr key={group.key} className="hover:bg-white/[0.025]">
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className="w-3 h-3 rounded-sm border border-white/20 shrink-0"
+                          style={{ backgroundColor: group.color || '#e7e4dc' }}
+                        />
+                        <span className="font-medium text-white truncate max-w-[220px]">{group.material}</span>
+                        {group.unplaced.length > 0 && (
+                          <span className="rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">Revisar</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5 font-mono">{group.thickness} mm</td>
+                    <td className="px-3 py-2.5 font-mono">{group.config.width} × {group.config.height} mm</td>
+                    <td className="px-3 py-2.5 text-right font-mono">{group.piecesCount}</td>
+                    <td className="px-3 py-2.5 text-right font-mono font-semibold text-white">{group.stats.boardsCount}</td>
+                    <td className="px-3 py-2.5 text-right font-mono">{group.requiredAreaM2.toFixed(2)} m²</td>
+                    <td className="px-3 py-2.5 text-right font-mono">{group.purchaseAreaM2.toFixed(2)} m²</td>
+                    <td className="px-3 py-2.5 text-right font-mono text-rose-300">{group.wasteAreaM2.toFixed(2)} m²</td>
+                    <td className={`px-3 py-2.5 text-right font-mono font-semibold ${group.stats.efficiency >= 80 ? 'text-emerald-400' : group.stats.efficiency >= 65 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
+                      {group.stats.efficiency.toFixed(1)}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#7f8995]">
+            <span>Canto delgado <strong className="ml-1 font-mono text-[#76a9ff]">{edgebandingTotals.thin} m</strong></span>
+            <span>Canto grueso <strong className="ml-1 font-mono text-[#ff8181]">{edgebandingTotals.thick} m</strong></span>
+            <span>Merma incluye cortes de sierra y refilado.</span>
+          </div>
+        </section>
       )}
 
       <div className="flex-1 flex overflow-hidden relative">
@@ -715,47 +519,58 @@ export default function CutPlanViewer({
               ))}
             </div>
 
-            {/* Material & Edgeband Summary Badges */}
-            <div className="hidden xl:flex items-center gap-3 text-[12px] font-mono bg-[#222222] border border-[#333333] px-3 py-1 rounded-lg text-[#aaa]">
-              <div className="flex items-center gap-1.5">
-                <BarChart3 className="w-3.5 h-3.5 text-[#f0a144]" />
-                <span className="text-white font-bold uppercase">18mm MELAMINA</span>
-                <span className="text-[#666]">|</span>
-                <span>{sheetConfig.width}x{sheetConfig.height}mm</span>
-                <span className="text-[#666]">|</span>
-                <span>Efic: <strong className="text-emerald-400">{totalStats.efficiency.toFixed(1)}%</strong></span>
-              </div>
-              <div className="h-3 w-px bg-[#444]"></div>
-              <div className="flex items-center gap-2">
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 bg-red-600 rounded-sm inline-block"></span>
-                  C.Grueso: <strong className="text-white">{edgebandingTotals.thick}m</strong>
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 bg-blue-600 rounded-sm inline-block"></span>
-                  C.Delgado: <strong className="text-white">{edgebandingTotals.thin}m</strong>
-                </span>
-              </div>
-            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowViewOptions(value => !value)}
+                className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium transition-colors ${showViewOptions ? 'border-[#f0a144]/50 bg-[#f0a144]/10 text-[#f7b766]' : 'border-white/10 bg-white/[0.03] text-[#9aa4af] hover:text-white'}`}
+                aria-expanded={showViewOptions}
+              >
+                <Eye className="w-3.5 h-3.5" />
+                Vista
+              </button>
 
-            {/* Zoom Control Buttons */}
-            <div className="flex items-center gap-1 bg-[#222222] border border-[#333333] p-0.5 rounded-lg shrink-0">
-              <button onClick={() => setZoom(z => Math.min(z + 0.25, 3))} className="p-1 rounded text-white hover:bg-[#333333] transition-colors" title="Aumentar Zoom">
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={() => setZoom(z => Math.max(z - 0.25, 0.4))} className="p-1 rounded text-white hover:bg-[#333333] transition-colors" title="Reducir Zoom">
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
-              <button onClick={() => setZoom(1)} className="p-1 rounded text-white hover:bg-[#333333] transition-colors" title="Restablecer Zoom (100%)">
-                <Maximize2 className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-center gap-1 bg-white/[0.03] border border-white/10 p-0.5 rounded-lg">
+                <button onClick={() => setZoom(z => Math.min(z + 0.25, 3))} className="p-1 rounded text-[#c7ced6] hover:bg-white/10 hover:text-white transition-colors" title="Aumentar zoom">
+                  <ZoomIn className="w-3.5 h-3.5" />
+                </button>
+                <button onClick={() => setZoom(z => Math.max(z - 0.25, 0.4))} className="p-1 rounded text-[#c7ced6] hover:bg-white/10 hover:text-white transition-colors" title="Reducir zoom">
+                  <ZoomOut className="w-3.5 h-3.5" />
+                </button>
+                <button onClick={() => setZoom(1)} className="p-1 rounded text-[#c7ced6] hover:bg-white/10 hover:text-white transition-colors" title="Restablecer zoom">
+                  <Maximize2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* BANDEJA SUPERIOR 2: OPCIONES DE CAPAS CAD Y ACCIONES */}
-          <div className="bg-[#181818] border-b border-[#2d2d2d] px-2 sm:px-4 py-1.5 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar shrink-0 shadow-sm z-10">
+          {showViewOptions && (
+          <div className="bg-[#15181c] border-b border-white/10 px-2 sm:px-4 py-2 flex items-center justify-between gap-4 overflow-x-auto no-scrollbar shrink-0 z-10">
             <div className="flex items-center gap-3 sm:gap-4 shrink-0 text-[12px] font-mono text-[#cccccc] select-none">
-              
+              <div className="flex items-center bg-white/[0.03] border border-white/10 p-0.5 rounded-lg shrink-0">
+                <button
+                  onClick={() => setLayoutMode('vertical')}
+                  className={`p-1.5 rounded transition-colors ${layoutMode === 'vertical' ? 'bg-[#f0a144] text-black' : 'text-[#89939f] hover:text-white'}`}
+                  title="Planchas en vertical"
+                >
+                  <Rows className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setLayoutMode('grid')}
+                  className={`p-1.5 rounded transition-colors ${layoutMode === 'grid' ? 'bg-[#f0a144] text-black' : 'text-[#89939f] hover:text-white'}`}
+                  title="Planchas en cuadrícula"
+                >
+                  <Grid className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => setLayoutMode('horizontal')}
+                  className={`p-1.5 rounded transition-colors ${layoutMode === 'horizontal' ? 'bg-[#f0a144] text-black' : 'text-[#89939f] hover:text-white'}`}
+                  title="Planchas en horizontal"
+                >
+                  <LayoutList className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
               {/* Checkbox: Show Piece Dimensions */}
               <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
                 <input 
@@ -859,6 +674,7 @@ export default function CutPlanViewer({
               </button>
             </div>
           </div>
+          )}
 
           {/* Top Panel: Boards Graph Canvas (100% LIMPIO SIN BANDEJAS FLOTANTES SOBRE EL PLANO) */}
           <div className={`flex-1 overflow-auto p-2 sm:p-6 relative touch-pan-x touch-pan-y ${mobileTab === 'list' ? 'hidden sm:block' : 'block'}`} ref={containerRef}>
@@ -871,29 +687,31 @@ export default function CutPlanViewer({
                 }
 
                 return (
-                  <div key={gIdx} className="flex flex-col gap-4 sm:gap-6">
-                    {/* Material & Thickness Group Static Banner */}
-                    <div className="flex items-center justify-between bg-[#222222] px-3 sm:px-4 py-2 rounded-xl border border-[#333333] shadow-md">
+                  <div key={group.key} className="flex flex-col gap-4 sm:gap-6">
+                    <div className="flex items-center justify-between gap-4 bg-[#1a1e23] px-3 sm:px-4 py-2.5 rounded-lg border border-white/[0.08]">
                       <div className="flex items-center gap-3">
-                        <BarChart3 className="w-4 h-4 sm:w-5 sm:h-5 text-[#f0a144] shrink-0" />
+                        <span
+                          className="w-4 h-4 rounded border border-white/20 shrink-0"
+                          style={{ backgroundColor: group.color || '#e7e4dc' }}
+                        />
                         <div className="flex flex-col">
-                          <span className="text-[12px] sm:text-[12px] font-black text-white uppercase tracking-[0.1em]">
+                          <span className="text-[12px] font-semibold text-white">
                             {group.material} · {group.thickness} mm
                           </span>
-                          <span className="text-[11px] sm:text-[12px] text-[#a0a0a0] font-mono">
-                             Formato Plancha: {group.config.width} x {group.config.height} mm | Planchas requeridas: {group.boards.length} | Eficiencia: {group.stats.efficiency.toFixed(1)}%
+                          <span className="text-[11px] text-[#7f8995] font-mono">
+                            {group.config.width} × {group.config.height} mm · {group.boards.length} {group.boards.length === 1 ? 'plancha' : 'planchas'} · {group.stats.efficiency.toFixed(1)}%
                           </span>
                         </div>
                       </div>
 
-                      <div className="hidden md:flex items-center gap-3 text-[12px] font-mono text-[#aaa]">
+                      <div className="hidden md:flex items-center gap-3 text-[11px] font-mono text-[#89939f]">
                         <span className="flex items-center gap-1">
-                          <span className="w-2.5 h-2.5 bg-red-600 rounded-sm inline-block"></span>
-                          Canto Grueso: <strong className="text-white">{edgebandingTotals.thick} m</strong>
+                          <span className="w-2 h-2 bg-blue-500 rounded-full inline-block"></span>
+                          Delgado <strong className="text-[#d9e0e7]">{group.thinEdgeM.toFixed(2)} m</strong>
                         </span>
                         <span className="flex items-center gap-1">
-                          <span className="w-2.5 h-2.5 bg-blue-600 rounded-sm inline-block"></span>
-                          Canto Delgado: <strong className="text-white">{edgebandingTotals.thin} m</strong>
+                          <span className="w-2 h-2 bg-red-500 rounded-full inline-block"></span>
+                          Grueso <strong className="text-[#d9e0e7]">{group.thickEdgeM.toFixed(2)} m</strong>
                         </span>
                       </div>
                     </div>
@@ -1788,20 +1606,32 @@ export default function CutPlanViewer({
                 <div className="bg-[#1a1a1a] border border-[#333333] rounded p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <BarChart3 className="w-3 h-3 text-[#f0a144]" />
-                    <span className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-wider">Estadísticas</span>
+                    <span className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-wider">Resumen de compra</span>
                   </div>
                   <div className="space-y-1.5">
                     <div className="flex justify-between text-[12px]">
                       <span className="text-[#666666] text-[12px]">PIEZAS TOTALES:</span>
-                      <span className="text-white font-mono">{pieces.reduce((acc, p) => acc + p.cantidad, 0)}</span>
+                      <span className="text-white font-mono">{totalStats.piecesCount}</span>
                     </div>
                     <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">ÁREA USADA:</span>
-                      <span className="text-white font-mono">{(totalStats.areaUsed / 1000000).toFixed(3)} m²</span>
+                      <span className="text-[#666666] text-[12px]">MATERIALES:</span>
+                      <span className="text-white font-mono">{totalStats.materialGroups}</span>
                     </div>
                     <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">PIEZAS ÚNICAS:</span>
-                      <span className="text-white font-mono">{pieces.length}</span>
+                      <span className="text-[#666666] text-[12px]">PLANCHAS:</span>
+                      <span className="text-white font-mono">{totalStats.boardsCount}</span>
+                    </div>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#666666] text-[12px]">ÁREA PIEZAS:</span>
+                      <span className="text-white font-mono">{totalStats.requiredAreaM2.toFixed(2)} m²</span>
+                    </div>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#666666] text-[12px]">ÁREA COMPRA:</span>
+                      <span className="text-white font-mono">{totalStats.purchaseAreaM2.toFixed(2)} m²</span>
+                    </div>
+                    <div className="flex justify-between text-[12px]">
+                      <span className="text-[#666666] text-[12px]">MERMA:</span>
+                      <span className="text-rose-300 font-mono">{totalStats.wasteAreaM2.toFixed(2)} m²</span>
                     </div>
                     <div className="h-px bg-[#333333] my-2" />
                     <div className="flex justify-between text-[12px]">

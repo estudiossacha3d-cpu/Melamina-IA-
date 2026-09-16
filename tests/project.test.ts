@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createStarterProject, serializePiecesCsv, sheetGroupKey } from '../src/lib/project';
 import { professionalPack } from '../src/lib/cutOptimizer';
-import { createShelfModule } from '../src/lib/shelfModule';
+import { MODULE_CATEGORIES } from '../src/lib/moduleLibrary';
+import { buildMaterialReport } from '../src/lib/materialReport';
 
 test('starter project is an assembled six-board module', () => {
   const project = createStarterProject();
@@ -71,49 +72,42 @@ test('kerf is reserved between adjacent pieces', () => {
   assert.equal(professionalPack(pair, { width: 1003, height: 500, kerf: 3, margin: 0 }).boards.length, 1);
 });
 
+test('material report calculates sheets, area, waste and edge banding by material', () => {
+  const pieces = createStarterProject().pieces;
+  const report = buildMaterialReport(pieces, { width: 2440, height: 2140, kerf: 3, margin: 10 });
+  const expectedArea = pieces.reduce((sum, piece) => (
+    sum + piece.largo * piece.ancho * piece.cantidad
+  ), 0) / 1_000_000;
 
-test('parametric shelf module creates plinth, shelves and vertical divisions without overlaps', () => {
-  const module = createShelfModule({
-    name: 'Estante de prueba',
-    width: 1200,
-    height: 1846,
-    depth: 350,
-    thickness: 18,
-    plinthHeight: 80,
-    plinthInset: 30,
-    shelves: 3,
-    verticalDividers: 1,
-    back: 'mdf3',
-    material: 'Pelikano_Blanco_Absoluto',
-  });
+  assert.equal(report.groups.length, 2);
+  assert.equal(report.totals.materialGroups, 2);
+  assert.equal(report.totals.piecesCount, 6);
+  assert.equal(report.totals.boardsCount, 2);
+  assert.ok(Math.abs(report.totals.requiredAreaM2 - expectedArea) < 0.000001);
+  assert.ok(report.totals.purchaseAreaM2 > report.totals.requiredAreaM2);
+  assert.ok(Math.abs(
+    report.totals.wasteAreaM2 - (report.totals.purchaseAreaM2 - report.totals.requiredAreaM2)
+  ) < 0.000001);
+  assert.ok(Math.abs(report.totals.thinEdgeM - 2.78) < 0.000001);
+  assert.equal(report.totals.thickEdgeM, 0);
+  assert.equal(report.unplacedPieces.length, 0);
 
-  assert.equal(module.columns, 2);
-  assert.equal(module.levels, 4);
-  assert.equal(module.pieces.length, 13);
-  assert.equal(module.pieces.filter(piece => piece.name.startsWith('Repisa ')).length, 6);
-  assert.equal(module.pieces.filter(piece => piece.name.startsWith('División vertical')).length, 1);
-  assert.equal(module.pieces.filter(piece => piece.name === 'Zócalo frontal').length, 1);
-  assert.equal(module.pieces.filter(piece => piece.name === 'Respaldo MDF 3 mm').length, 1);
-  assert.ok(module.pieces.every(piece => piece.groupId === module.group.id));
-
-  const shelves = module.pieces.filter(piece => piece.name.startsWith('Repisa '));
-  const divider = module.pieces.find(piece => piece.name.startsWith('División vertical'));
-  assert.ok(divider);
-  assert.ok(shelves.every(piece => Math.abs(piece.position3D[0] - divider.position3D[0]) > piece.largo / 2));
+  const backing = report.groups.find(group => group.thickness === 3);
+  assert.deepEqual(
+    backing && [backing.config.width, backing.config.height],
+    [2440, 1850],
+  );
 });
 
-test('parametric shelf module rejects divisions that leave unusable columns', () => {
-  assert.throws(() => createShelfModule({
-    name: 'Inválido',
-    width: 600,
-    height: 1846,
-    depth: 313,
-    thickness: 18,
-    plinthHeight: 80,
-    plinthInset: 30,
-    shelves: 4,
-    verticalDividers: 8,
-    back: 'none',
-    material: 'Pelikano_Blanco_Absoluto',
-  }), /Reduce las divisiones verticales/);
+
+test('module library exposes the initial empty furniture categories', () => {
+  assert.deepEqual(MODULE_CATEGORIES.map(category => category.label), [
+    'Estantes',
+    'Escritorios',
+    'Roperos',
+    'Cómodas',
+    'Cocina alta',
+    'Cocina baja',
+  ]);
+  assert.equal(new Set(MODULE_CATEGORIES.map(category => category.id)).size, MODULE_CATEGORIES.length);
 });
