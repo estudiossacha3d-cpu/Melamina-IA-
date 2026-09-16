@@ -1020,7 +1020,7 @@ export default function App() {
              </div>
              <div className="flex items-center gap-2 sm:gap-4">
                <span className="hidden sm:inline">Unidades: milímetros</span>
-               <span className="text-[#cbd3dc]">v0.11</span>
+               <span className="text-[#cbd3dc]">v0.12</span>
              </div>
           </footer>
         </div>

@@ -3,6 +3,7 @@ import test from 'node:test';
 import { createStarterProject, serializePiecesCsv, sheetGroupKey } from '../src/lib/project';
 import { professionalPack } from '../src/lib/cutOptimizer';
 import { MODULE_CATEGORIES } from '../src/lib/moduleLibrary';
+import { buildMaterialReport } from '../src/lib/materialReport';
 
 test('starter project is an assembled six-board module', () => {
   const project = createStarterProject();
@@ -69,6 +70,33 @@ test('kerf is reserved between adjacent pieces', () => {
 
   assert.equal(professionalPack(pair, { width: 1002, height: 500, kerf: 3, margin: 0 }).boards.length, 2);
   assert.equal(professionalPack(pair, { width: 1003, height: 500, kerf: 3, margin: 0 }).boards.length, 1);
+});
+
+test('material report calculates sheets, area, waste and edge banding by material', () => {
+  const pieces = createStarterProject().pieces;
+  const report = buildMaterialReport(pieces, { width: 2440, height: 2140, kerf: 3, margin: 10 });
+  const expectedArea = pieces.reduce((sum, piece) => (
+    sum + piece.largo * piece.ancho * piece.cantidad
+  ), 0) / 1_000_000;
+
+  assert.equal(report.groups.length, 2);
+  assert.equal(report.totals.materialGroups, 2);
+  assert.equal(report.totals.piecesCount, 6);
+  assert.equal(report.totals.boardsCount, 2);
+  assert.ok(Math.abs(report.totals.requiredAreaM2 - expectedArea) < 0.000001);
+  assert.ok(report.totals.purchaseAreaM2 > report.totals.requiredAreaM2);
+  assert.ok(Math.abs(
+    report.totals.wasteAreaM2 - (report.totals.purchaseAreaM2 - report.totals.requiredAreaM2)
+  ) < 0.000001);
+  assert.ok(Math.abs(report.totals.thinEdgeM - 2.78) < 0.000001);
+  assert.equal(report.totals.thickEdgeM, 0);
+  assert.equal(report.unplacedPieces.length, 0);
+
+  const backing = report.groups.find(group => group.thickness === 3);
+  assert.deepEqual(
+    backing && [backing.config.width, backing.config.height],
+    [2440, 1850],
+  );
 });
 
 
