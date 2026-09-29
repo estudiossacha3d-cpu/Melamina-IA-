@@ -2,11 +2,11 @@ import React from 'react';
 import { 
   Undo2, Redo2, Magnet, Copy, Trash2, 
   Move, RotateCcw, RotateCw, Expand, Settings,
-  Group, Ungroup, ListPlus, Ruler,
+  Group, Ungroup, ListPlus, Ruler, Maximize2,
   Info, X, ArrowUp, ArrowDown, ArrowRight, ArrowLeft,
   Rows3, Layers, CopyPlus, Pencil, Check, Palette,
   Image as ImageIcon, Sliders, Zap, ChevronDown, ChevronUp,
-  Eye, EyeOff
+  Eye, EyeOff, FolderOpen
 } from 'lucide-react';
 import { Piece, EdgeConfig, EdgeThicknessConfig, PieceFaceKey, FaceTextureOptions, Group3D } from '../types';
 import { calculatePieceCutDimensions, DEFAULT_EDGE_THICKNESS_CONFIG } from '../lib/edgeCalculations';
@@ -17,6 +17,9 @@ interface ThreeViewerOverlayProps {
   selectedPieceId: string | null;
   selectedPieceIds?: string[];
   groups?: Group3D[];
+  editingGroupId?: string | null;
+  onEnterGroup?: (groupId: string) => void;
+  onExitGroup?: () => void;
   activeDisplacement?: {
     dx: number;
     dy: number;
@@ -42,8 +45,8 @@ interface ThreeViewerOverlayProps {
   onToggleSnap: () => void;
   multiSelectMode: boolean;
   onToggleMultiSelect: () => void;
-  transformMode: 'translate' | 'rotate' | 'scale' | 'texture';
-  onChangeTransformMode: (mode: 'translate' | 'rotate' | 'scale' | 'texture') => void;
+  transformMode: 'translate' | 'rotate' | 'scale' | 'texture' | 'stretch';
+  onChangeTransformMode: (mode: 'translate' | 'rotate' | 'scale' | 'texture' | 'stretch') => void;
   isTextureModalOpen?: boolean;
   onOpenTextureEditor?: () => void;
   dimensionSide?: 'pos' | 'neg';
@@ -181,7 +184,10 @@ export default function ThreeViewerOverlay({
   onChangeArrayAxis,
   arrayOffset = 1.0,
   onChangeArrayOffset,
-  onExecuteDistribution
+  onExecuteDistribution,
+  editingGroupId,
+  onEnterGroup,
+  onExitGroup
 }: ThreeViewerOverlayProps) {
   
   const selectedPiece = pieces.find(p => p.id === selectedPieceId) || (selectedPieceIds.length > 0 ? pieces.find(p => p.id === selectedPieceIds[0]) : undefined);
@@ -201,13 +207,13 @@ export default function ThreeViewerOverlay({
   React.useEffect(() => {
     if (selectedPiece) {
       const grp = selectedPiece.groupId ? groups?.find(g => g.id === selectedPiece.groupId) : null;
-      if (grp) {
+      if (grp && !editingGroupId) {
         setNameInputValue(grp.name);
       } else {
         setNameInputValue(selectedPiece.name || 'PIEZA');
       }
     }
-  }, [selectedPiece?.id, selectedPiece?.name, selectedPiece?.groupId, groups]);
+  }, [selectedPiece?.id, selectedPiece?.name, selectedPiece?.groupId, groups, editingGroupId]);
 
   const handleCommitName = (rawName: string) => {
     const trimmed = rawName.trim();
@@ -216,7 +222,7 @@ export default function ThreeViewerOverlay({
       return;
     }
     const grp = selectedPiece.groupId ? groups?.find(g => g.id === selectedPiece.groupId) : null;
-    if (grp) {
+    if (grp && !editingGroupId) {
       onUpdateGroup?.(grp.id, trimmed);
     } else {
       onUpdatePiece(selectedPiece.id, { name: trimmed });
@@ -331,9 +337,9 @@ export default function ThreeViewerOverlay({
         const groupPiecesCount = currentGroup ? pieces.filter(p => p.groupId === currentGroup.id).length : 0;
 
         return (
-          <div className="absolute top-12 left-4 pointer-events-auto z-20 flex flex-col items-start gap-1 max-w-[calc(100vw-32px)] select-none">
-            {/* Fila 1: Píldora de la pieza con nombre, medidas y controles */}
-            <div className="flex items-center gap-1.5 bg-[#141414]/90 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10 shadow-lg text-[9px]">
+          <div className="absolute top-12 left-3 sm:left-4 pointer-events-auto z-20 flex flex-col items-start gap-1 max-w-[calc(100vw-80px)] select-none">
+            {/* Párrafo 1: Nombre de la Pieza o Grupo + Botón Entrar/Salir */}
+            <div className="inline-flex items-center gap-1.5 bg-[#141414]/90 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10 shadow-lg text-[9px] flex-nowrap whitespace-nowrap">
               <span 
                 className="w-2 h-2 rounded-full shrink-0 border border-white/30 shadow-xs"
                 style={{ backgroundColor: matColor }}
@@ -342,50 +348,123 @@ export default function ThreeViewerOverlay({
 
               {currentGroup ? (
                 /* Cuando es un grupo: mostrar el nombre del grupo directamente (sin 'NUEVA PIEZA') */
-                isEditingName ? (
-                  <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="text"
-                      autoFocus
-                      value={nameInputValue}
-                      onChange={(e) => setNameInputValue(e.target.value)}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter') handleCommitName(nameInputValue);
-                        if (e.key === 'Escape') setIsEditingName(false);
-                      }}
-                      className="bg-[#0a0a0a] border border-cyan-400 text-cyan-300 font-bold text-[9px] uppercase px-1.5 py-0.5 rounded outline-none max-w-[130px]"
-                    />
-                    <button 
-                      type="button" 
-                      onClick={() => handleCommitName(nameInputValue)} 
-                      className="p-0.5 rounded bg-cyan-500 text-black hover:bg-cyan-400 transition-colors"
-                      title="Guardar nombre del grupo"
+                editingGroupId ? (
+                  /* Modo dentro del grupo: editando piezas del grupo */
+                  <div className="inline-flex items-center gap-1 flex-nowrap shrink-0">
+                    <div className="flex items-center gap-1 bg-cyan-950/80 px-1.5 py-0.5 rounded-full border border-cyan-500/50 text-cyan-300 shrink-0">
+                      <FolderOpen className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
+                      <span className="font-black uppercase text-[8px] sm:text-[9px] truncate max-w-[70px] sm:max-w-[120px]">
+                        {currentGroup.name}
+                      </span>
+                    </div>
+
+                    {isEditingName ? (
+                      <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="text"
+                          autoFocus
+                          value={nameInputValue}
+                          onChange={(e) => setNameInputValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Enter') handleCommitName(nameInputValue);
+                            if (e.key === 'Escape') setIsEditingName(false);
+                          }}
+                          className="bg-[#0a0a0a] border border-[#f0a144] text-[#f0a144] font-bold text-[9px] uppercase px-1 py-0.2 rounded outline-none max-w-[80px]"
+                        />
+                        <button 
+                          type="button" 
+                          onClick={() => handleCommitName(nameInputValue)} 
+                          className="p-0.5 rounded bg-[#f0a144] text-black"
+                        >
+                          <Check className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div 
+                        className="flex items-center gap-1 cursor-pointer group shrink-0"
+                        onClick={() => {
+                          setNameInputValue(selectedPiece.name || 'PIEZA');
+                          setIsEditingName(true);
+                        }}
+                        title="Clic para renombrar pieza dentro del grupo"
+                      >
+                        <span className="font-black uppercase text-[#f0a144] truncate max-w-[70px] sm:max-w-[110px]">
+                          {selectedPiece.name || 'PIEZA'}
+                        </span>
+                        <Pencil className="w-2 h-2 text-gray-400 group-hover:text-[#f0a144] shrink-0" />
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={onExitGroup}
+                      className="flex items-center gap-0.5 bg-cyan-500 hover:bg-cyan-400 text-black font-black text-[7.5px] px-1.5 py-0.5 rounded-full transition-all cursor-pointer shadow-xs active:scale-95 shrink-0"
+                      title="Salir del modo edición de grupo (Esc)"
                     >
-                      <Check className="w-2.5 h-2.5" />
+                      <Check className="w-2 h-2 shrink-0" />
+                      <span>Salir</span>
                     </button>
                   </div>
                 ) : (
-                  <div 
-                    className="flex items-center gap-1 cursor-pointer group/grp"
-                    onClick={() => {
-                      setNameInputValue(currentGroup.name);
-                      setIsEditingName(true);
-                    }}
-                    title="Clic para renombrar grupo"
-                  >
-                    <Group className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
-                    <span className="font-black uppercase text-cyan-300 truncate max-w-[110px] sm:max-w-[160px]">
-                      {currentGroup.name}
-                    </span>
-                    <span className="text-[7.5px] font-mono text-cyan-400/80">({groupPiecesCount} {groupPiecesCount === 1 ? 'pz' : 'pzs'})</span>
-                    <Pencil className="w-2 h-2 text-cyan-500/60 group-hover/grp:text-cyan-300 ml-0.5" />
+                  /* Grupo seleccionado completo: opción para renombrar o entrar al grupo */
+                  <div className="inline-flex items-center gap-1 flex-nowrap shrink-0">
+                    {isEditingName ? (
+                      <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="text"
+                          autoFocus
+                          value={nameInputValue}
+                          onChange={(e) => setNameInputValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === 'Enter') handleCommitName(nameInputValue);
+                            if (e.key === 'Escape') setIsEditingName(false);
+                          }}
+                          className="bg-[#0a0a0a] border border-cyan-400 text-cyan-300 font-bold text-[9px] uppercase px-1.5 py-0.5 rounded outline-none max-w-[110px]"
+                        />
+                        <button 
+                          type="button" 
+                          onClick={() => handleCommitName(nameInputValue)} 
+                          className="p-0.5 rounded bg-cyan-500 text-black hover:bg-cyan-400 transition-colors"
+                          title="Guardar nombre del grupo"
+                        >
+                          <Check className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div 
+                        className="flex items-center gap-0.5 cursor-pointer group/grp shrink-0"
+                        onClick={() => {
+                          setNameInputValue(currentGroup.name);
+                          setIsEditingName(true);
+                        }}
+                        title="Clic para renombrar grupo"
+                      >
+                        <Group className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
+                        <span className="font-black uppercase text-cyan-300 truncate max-w-[80px] sm:max-w-[130px]">
+                          {currentGroup.name}
+                        </span>
+                        <span className="text-[7.5px] font-mono text-cyan-400/80 shrink-0">({groupPiecesCount}pz)</span>
+                        <Pencil className="w-2 h-2 text-cyan-500/60 group-hover/grp:text-cyan-300 shrink-0 ml-0.5" />
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => onEnterGroup?.(currentGroup.id)}
+                      className="flex items-center gap-0.5 bg-cyan-500/20 hover:bg-cyan-500 text-cyan-300 hover:text-black font-bold text-[7.5px] px-1.5 py-0.5 rounded-full border border-cyan-400/40 transition-all cursor-pointer shadow-xs active:scale-95 shrink-0"
+                      title="Entrar al grupo para editar piezas individuales dentro de él (o doble clic)"
+                    >
+                      <FolderOpen className="w-2.5 h-2.5 shrink-0" />
+                      <span>Entrar</span>
+                    </button>
                   </div>
                 )
               ) : (
                 /* Cuando es una pieza individual: mostrar nombre de pieza */
                 isEditingName ? (
-                  <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="text"
                       autoFocus
@@ -408,7 +487,7 @@ export default function ThreeViewerOverlay({
                   </div>
                 ) : (
                   <div 
-                    className="flex items-center gap-1 cursor-pointer group"
+                    className="flex items-center gap-1 cursor-pointer group shrink-0"
                     onClick={() => {
                       setNameInputValue(selectedPiece.name || 'PIEZA');
                       setIsEditingName(true);
@@ -418,7 +497,7 @@ export default function ThreeViewerOverlay({
                     <span className="font-black uppercase text-[#f0a144] truncate max-w-[100px] sm:max-w-[150px]">
                       {selectedPiece.name || 'PIEZA'}
                     </span>
-                    <Pencil className="w-2 h-2 text-gray-400 group-hover:text-[#f0a144]" />
+                    <Pencil className="w-2 h-2 text-gray-400 group-hover:text-[#f0a144] shrink-0" />
                   </div>
                 )
               )}
@@ -429,51 +508,12 @@ export default function ThreeViewerOverlay({
                   <span>{selectedPieces.length} pzs</span>
                 </span>
               )}
-
-              <span className="text-gray-400 font-mono font-bold border-l border-white/10 pl-1.5 ml-0.5 shrink-0 text-[8.5px]">
-                {liveScaleDims ? liveScaleDims.largo : Math.round(selectedPiece.largo)}×
-                {liveScaleDims ? liveScaleDims.ancho : Math.round(selectedPiece.ancho)}×
-                {liveScaleDims ? liveScaleDims.espesor : Math.round(selectedPiece.espesor)}
-                <span className="text-[7px] text-gray-500 ml-0.5">mm</span>
-              </span>
-
-              {cantoItems.length > 0 && (
-                <span className="hidden sm:inline-flex text-[7px] font-mono text-cyan-300 bg-cyan-950/60 px-1 py-0.2 rounded border border-cyan-800/50 shrink-0">
-                  C:{cantoItems.map(c => c.side).join(',')}
-                </span>
-              )}
-
-              {ranuraBadgeInfo && (
-                <span className="hidden sm:inline-flex text-[7px] font-mono text-amber-300 bg-amber-950/60 px-1 py-0.2 rounded border border-amber-800/50 shrink-0">
-                  R:{ranuraBadgeInfo.text}
-                </span>
-              )}
-
-              {/* Ocultar entidad */}
-              <button
-                type="button"
-                onClick={handleToggleHide}
-                className="p-0.5 text-gray-400 hover:text-amber-400 transition-colors rounded hover:bg-white/10"
-                title={selectedPiece.hidden ? "Mostrar entidad" : "Ocultar entidad"}
-              >
-                {selectedPiece.hidden ? <Eye className="w-3 h-3 text-amber-400" /> : <EyeOff className="w-3 h-3" />}
-              </button>
-
-              {/* Deseleccionar */}
-              <button
-                type="button"
-                onClick={() => onSelectPiece(null)}
-                className="p-0.5 text-gray-400 hover:text-white transition-colors rounded hover:bg-white/10"
-                title="Deseleccionar pieza"
-              >
-                <X className="w-3 h-3" />
-              </button>
             </div>
 
-            {/* Fila 2 (DEBAJO): Color de la pieza / Material */}
+            {/* Párrafo 2: Color de la pieza / Material */}
             <div 
               onClick={onOpenTextureEditor}
-              className={`flex items-center gap-1.5 bg-[#121316]/95 backdrop-blur-md px-2.5 py-0.5 rounded-full border border-white/10 shadow-md text-[8px] transition-all ${
+              className={`inline-flex items-center gap-1.5 bg-[#121316]/95 backdrop-blur-md px-2.5 py-0.5 rounded-full border border-white/10 shadow-md text-[8px] transition-all whitespace-nowrap ${
                 onOpenTextureEditor ? 'cursor-pointer hover:border-[#f0a144]/60 hover:bg-[#1c1d24]' : ''
               }`}
               title="Material y color de la pieza (Clic para abrir catálogo)"
@@ -486,7 +526,7 @@ export default function ThreeViewerOverlay({
                   backgroundSize: 'cover'
                 }}
               />
-              <span className="font-semibold text-gray-200 truncate max-w-[160px] sm:max-w-[240px]">
+              <span className="font-semibold text-gray-200 truncate max-w-[140px] sm:max-w-[220px]">
                 {matDisplayName}
               </span>
               {selectedPiece.veta && (
@@ -498,13 +538,58 @@ export default function ThreeViewerOverlay({
                 <Palette className="w-2.5 h-2.5 text-gray-400 hover:text-[#f0a144] ml-0.5 shrink-0" />
               )}
             </div>
+
+            {/* Párrafo 3: Medidas de la pieza + Cantos + Ranura + Controles (Ocultar / Deseleccionar) */}
+            <div className="inline-flex items-center gap-1.5 bg-[#141414]/90 backdrop-blur-md px-2.5 py-0.5 rounded-full border border-white/10 shadow-lg text-[8.5px] whitespace-nowrap flex-nowrap">
+              <Ruler className="w-2.5 h-2.5 text-[#f0a144] shrink-0" />
+              <span className="text-gray-200 font-mono font-bold text-[8.5px] whitespace-nowrap">
+                {liveScaleDims ? liveScaleDims.largo : Math.round(selectedPiece.largo)}×
+                {liveScaleDims ? liveScaleDims.ancho : Math.round(selectedPiece.ancho)}×
+                {liveScaleDims ? liveScaleDims.espesor : Math.round(selectedPiece.espesor)}
+                <span className="text-[7px] text-gray-400 ml-0.5">mm</span>
+              </span>
+
+              {cantoItems.length > 0 && (
+                <span className="inline-flex text-[7px] font-mono text-cyan-300 bg-cyan-950/60 px-1 py-0.2 rounded border border-cyan-800/50 shrink-0">
+                  C:{cantoItems.map(c => c.side).join(',')}
+                </span>
+              )}
+
+              {ranuraBadgeInfo && (
+                <span className="inline-flex text-[7px] font-mono text-amber-300 bg-amber-950/60 px-1 py-0.2 rounded border border-amber-800/50 shrink-0">
+                  R:{ranuraBadgeInfo.text}
+                </span>
+              )}
+
+              <div className="h-2.5 w-px bg-white/10 mx-0.5 shrink-0" />
+
+              {/* Ocultar entidad */}
+              <button
+                type="button"
+                onClick={handleToggleHide}
+                className="p-0.5 text-gray-400 hover:text-amber-400 transition-colors rounded hover:bg-white/10 shrink-0 cursor-pointer"
+                title={selectedPiece.hidden ? "Mostrar entidad" : "Ocultar entidad"}
+              >
+                {selectedPiece.hidden ? <Eye className="w-3 h-3 text-amber-400" /> : <EyeOff className="w-3 h-3" />}
+              </button>
+
+              {/* Deseleccionar */}
+              <button
+                type="button"
+                onClick={() => onSelectPiece(null)}
+                className="p-0.5 text-gray-400 hover:text-white transition-colors rounded hover:bg-white/10 shrink-0 cursor-pointer"
+                title="Deseleccionar pieza"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
           </div>
         );
       })()}
 
       {/* Barra Inferior Modular de Opciones (Dock Móvil y Práctico) */}
       {!isTextureModalOpen && (
-        <div className="absolute bottom-2.5 sm:bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 pointer-events-auto z-20 max-w-[98vw]">
+        <div className="absolute bottom-2.5 sm:bottom-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 pointer-events-auto z-20 w-full max-w-[98vw] px-2">
           {/* Barra Activa Desplegable (Ultra compacta, directamente sobre las pestañas) */}
           {activeOptionTab && selectedPiece && (() => {
             const currentCantos = selectedPiece.cantos || {
@@ -557,6 +642,7 @@ export default function ThreeViewerOverlay({
             const cutInfo = calculatePieceCutDimensions(selectedPiece, edgeThicknessConfig);
 
             const matInfo = getMaterialDefinition(selectedPiece.material);
+            const matDisplayName = matInfo ? matInfo.name : (selectedPiece.material || 'Melamina');
             const actualColor = selectedPiece.customColor || matInfo?.color || '#ffffff';
             const texturedFacesCount = selectedPiece.faceTextures 
               ? Object.values(selectedPiece.faceTextures).filter(Boolean).length 
@@ -635,137 +721,153 @@ export default function ThreeViewerOverlay({
             };
 
             return (
-              <div className="bg-[#181818]/95 backdrop-blur-md rounded-2xl border border-[#333333] shadow-2xl p-2 px-3 flex flex-col gap-1.5 w-auto max-w-[96vw] animate-in fade-in slide-in-from-bottom-2 duration-150">
+              <div className="bg-[#181818]/95 backdrop-blur-md rounded-2xl border border-[#333333] shadow-2xl p-2 sm:p-2.5 flex flex-col gap-1.5 w-full max-w-[360px] max-h-[50vh] overflow-y-auto overflow-x-hidden animate-in fade-in slide-in-from-bottom-2 duration-150">
                 {/* Header del panel activo */}
                 <div className="flex items-center justify-between gap-4 pb-1 border-b border-white/5">
                   <span className="text-[8.5px] font-black uppercase tracking-wider text-[#f0a144] flex items-center gap-1.5">
                     {activeOptionTab === 'medidas' && <><Ruler className="w-3 h-3 text-[#f0a144]" /> Medidas</>}
                     {activeOptionTab === 'material' && <><Palette className="w-3 h-3 text-[#f0a144]" /> Materiales & Texturas</>}
                     {activeOptionTab === 'cantos' && <><Layers className="w-3 h-3 text-[#f0a144]" /> Cantos (Tapacantos)</>}
-                    {activeOptionTab === 'veta' && <><Sliders className="w-3 h-3 text-[#f0a144]" /> Veta y Ranura</>}
-                    {activeOptionTab === 'acciones' && <><Zap className="w-3 h-3 text-[#f0a144]" /> Multiplicar y Distribuir</>}
+                    {activeOptionTab === 'veta' && <><Sliders className="w-3 h-3 text-[#f0a144]" /> Veta y Ranura (Mec)</>}
+                    {activeOptionTab === 'acciones' && <><Zap className="w-3 h-3 text-[#f0a144]" /> Acciones & Distribución</>}
                   </span>
                   <button
                     type="button"
                     onClick={() => setActiveOptionTab(null)}
                     className="text-gray-400 hover:text-white p-0.5 rounded hover:bg-white/10 transition-colors cursor-pointer"
-                    title="Minimizar"
+                    title="Cerrar panel"
                   >
                     <ChevronDown className="w-3.5 h-3.5" />
                   </button>
                 </div>
 
-                {/* Contenido de la barra activa */}
+                {/* 1. Medidas: Reorganizado en 3 columnas 100% responsive para móvil */}
                 {activeOptionTab === 'medidas' && (
-                  <div className="flex items-center gap-1 overflow-x-auto pb-0.5 max-w-[320px]">
-                    <div className="flex-1 min-w-[75px]">
-                      <EntityCompactDimField
-                        label="Largo"
-                        axis="X"
-                        axisColor="text-red-400"
-                        borderFocus="focus-within:border-red-500/70"
-                        value={liveScaleDims ? liveScaleDims.largo : Math.round(selectedPiece.largo)}
-                        min={10}
-                        onCommit={(val) => {
-                          if (isMultiPiece) {
-                            selectedPieces.forEach(p => onUpdatePiece(p.id, { largo: val }));
-                          } else {
-                            onUpdatePiece(selectedPiece.id, { largo: val });
-                          }
-                        }}
-                      />
-                    </div>
-                    <div className="flex-1 min-w-[75px]">
-                      <EntityCompactDimField
-                        label="Espesor"
-                        axis="Y"
-                        axisColor="text-emerald-400"
-                        borderFocus="focus-within:border-emerald-500/70"
-                        value={liveScaleDims ? liveScaleDims.espesor : Math.round(selectedPiece.espesor)}
-                        min={1}
-                        max={100}
-                        onCommit={(val) => {
-                          if (isMultiPiece) {
-                            selectedPieces.forEach(p => onUpdatePiece(p.id, { espesor: val }));
-                          } else {
-                            onUpdatePiece(selectedPiece.id, { espesor: val });
-                          }
-                        }}
-                      />
-                    </div>
-                    <div className="flex-1 min-w-[75px]">
-                      <EntityCompactDimField
-                        label="Ancho"
-                        axis="Z"
-                        axisColor="text-blue-400"
-                        borderFocus="focus-within:border-blue-500/70"
-                        value={liveScaleDims ? liveScaleDims.ancho : Math.round(selectedPiece.ancho)}
-                        min={10}
-                        onCommit={(val) => {
-                          if (isMultiPiece) {
-                            selectedPieces.forEach(p => onUpdatePiece(p.id, { ancho: val }));
-                          } else {
-                            onUpdatePiece(selectedPiece.id, { ancho: val });
-                          }
-                        }}
-                      />
-                    </div>
+                  <div className="grid grid-cols-3 gap-1.5 w-full">
+                    <EntityCompactDimField
+                      label="Largo"
+                      axis="X"
+                      axisColor="text-red-400"
+                      borderFocus="focus-within:border-red-500/70"
+                      value={liveScaleDims ? liveScaleDims.largo : Math.round(selectedPiece.largo)}
+                      min={10}
+                      onCommit={(val) => {
+                        if (isMultiPiece) {
+                          selectedPieces.forEach(p => onUpdatePiece(p.id, { largo: val }));
+                        } else {
+                          onUpdatePiece(selectedPiece.id, { largo: val });
+                        }
+                      }}
+                    />
+                    <EntityCompactDimField
+                      label="Espesor"
+                      axis="Y"
+                      axisColor="text-emerald-400"
+                      borderFocus="focus-within:border-emerald-500/70"
+                      value={liveScaleDims ? liveScaleDims.espesor : Math.round(selectedPiece.espesor)}
+                      min={1}
+                      max={100}
+                      onCommit={(val) => {
+                        if (isMultiPiece) {
+                          selectedPieces.forEach(p => onUpdatePiece(p.id, { espesor: val }));
+                        } else {
+                          onUpdatePiece(selectedPiece.id, { espesor: val });
+                        }
+                      }}
+                    />
+                    <EntityCompactDimField
+                      label="Ancho"
+                      axis="Z"
+                      axisColor="text-blue-400"
+                      borderFocus="focus-within:border-blue-500/70"
+                      value={liveScaleDims ? liveScaleDims.ancho : Math.round(selectedPiece.ancho)}
+                      min={10}
+                      onCommit={(val) => {
+                        if (isMultiPiece) {
+                          selectedPieces.forEach(p => onUpdatePiece(p.id, { ancho: val }));
+                        } else {
+                          onUpdatePiece(selectedPiece.id, { ancho: val });
+                        }
+                      }}
+                    />
                   </div>
                 )}
 
+                {/* 2. Material: Optimizada con vista previa y botón directo */}
                 {activeOptionTab === 'material' && (
-                  <div className="flex items-center gap-1.5 py-0.5">
-                    {/* Solo Catálogo de Materiales */}
-                    {onOpenTextureEditor && (
-                      <button
-                        type="button"
-                        onClick={onOpenTextureEditor}
-                        className="text-[9px] sm:text-[10px] font-bold text-black bg-[#f0a144] hover:bg-[#ffba66] px-3 py-1 rounded-lg transition-all shadow-xs flex items-center gap-1 cursor-pointer active:scale-95"
-                        title="Abrir Catálogo de Materiales"
-                      >
-                        <Palette className="w-3 h-3 text-black" />
-                        <span>Abrir Catálogo</span>
-                      </button>
-                    )}
+                  <div className="flex flex-col gap-1.5 w-full py-0.5">
+                    <div className="flex items-center justify-between gap-2 bg-[#101010] p-1.5 rounded-lg border border-white/5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span 
+                          className="w-4 h-4 rounded-full shrink-0 border border-white/30 shadow-xs"
+                          style={{ 
+                            backgroundColor: actualColor,
+                            backgroundImage: sampleTextureUrl ? `url(${sampleTextureUrl})` : undefined,
+                            backgroundSize: 'cover'
+                          }}
+                        />
+                        <span className="text-[8.5px] font-bold text-gray-200 truncate">{matDisplayName}</span>
+                      </div>
+                      {sampleTextureUrl && (
+                        <span className="text-[7px] font-mono text-[#f0a144] bg-[#f0a144]/15 px-1 py-0.5 rounded border border-[#f0a144]/30 font-bold shrink-0">
+                          TEXTURA 3D
+                        </span>
+                      )}
+                    </div>
 
-                    {sampleTextureUrl && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const defaultWhite = MATERIAL_MAP['Blanco'];
-                          const updates: Partial<Piece> = { 
-                            material: 'Blanco',
-                            customColor: defaultWhite.color,
-                            customRoughness: defaultWhite.roughness,
-                            customMetalness: defaultWhite.metalness,
-                            customOpacity: 1.0,
-                            isGlass: false,
-                            isMirror: false,
-                            cantoColor: undefined,
-                            faceTextures: undefined, 
-                            faceTextureConfigs: undefined, 
-                            veta: false,
-                            vetaRotation: 0,
-                            vetaOrientacion: 'longitudinal'
-                          };
-                          if (isMultiPiece) {
-                            selectedPieces.forEach(p => onUpdatePiece(p.id, updates));
-                          } else {
-                            onUpdatePiece(selectedPiece.id, updates);
-                          }
-                        }}
-                        className="text-red-400 hover:text-red-300 text-[8px] px-2 py-1 rounded bg-red-950/40 border border-red-800/40 transition-colors cursor-pointer shrink-0"
-                        title="Quitar textura y aplicar melamina blanco mate por defecto"
-                      >
-                        Quitar textura
-                      </button>
-                    )}
+                    <div className="flex items-center gap-1.5">
+                      {onOpenTextureEditor && (
+                        <button
+                          type="button"
+                          onClick={onOpenTextureEditor}
+                          className="flex-1 py-1.5 px-3 rounded-lg bg-[#f0a144] hover:bg-[#ffba66] text-black font-black text-[8.5px] uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-95 cursor-pointer"
+                          title="Abrir Catálogo de Materiales"
+                        >
+                          <Palette className="w-3.5 h-3.5 text-black" />
+                          <span>Catálogo de Materiales</span>
+                        </button>
+                      )}
+
+                      {sampleTextureUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const defaultWhite = MATERIAL_MAP['Blanco'];
+                            const updates: Partial<Piece> = { 
+                              material: 'Blanco',
+                              customColor: defaultWhite.color,
+                              customRoughness: defaultWhite.roughness,
+                              customMetalness: defaultWhite.metalness,
+                              customOpacity: 1.0,
+                              isGlass: false,
+                              isMirror: false,
+                              cantoColor: undefined,
+                              faceTextures: undefined, 
+                              faceTextureConfigs: undefined, 
+                              veta: false,
+                              vetaRotation: 0,
+                              vetaOrientacion: 'longitudinal'
+                            };
+                            if (isMultiPiece) {
+                              selectedPieces.forEach(p => onUpdatePiece(p.id, updates));
+                            } else {
+                              onUpdatePiece(selectedPiece.id, updates);
+                            }
+                          }}
+                          className="text-red-400 hover:text-red-300 text-[8px] font-bold px-2 py-1.5 rounded-lg bg-red-950/40 border border-red-800/40 transition-colors cursor-pointer shrink-0"
+                          title="Quitar textura y aplicar melamina blanco mate por defecto"
+                        >
+                          Quitar textura
+                        </button>
+                      )}
+                    </div>
                   </div>
                 )}
 
+                {/* 3. Cantos: Grid 2x2 en móvil para no cortarse jamás */}
                 {activeOptionTab === 'cantos' && (
-                  <div className="flex flex-col gap-1.5">
-                    <div className="flex items-center gap-1 overflow-x-auto pb-0.5">
+                  <div className="flex flex-col gap-1.5 w-full">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 w-full">
                       <EntityCantoField
                         label="L1"
                         sub="Frente"
@@ -799,32 +901,33 @@ export default function ThreeViewerOverlay({
                         onCycle={(rev) => handleCycleEdge('ancho2', rev)}
                       />
                     </div>
-                    <div className="flex items-center justify-between gap-2 pt-0.5 border-t border-white/5 text-[7.5px]">
+                    <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-white/5 text-[7.5px]">
                       <button
                         type="button"
                         onClick={handleCycleAll}
-                        className="font-mono font-bold text-[#f0a144] hover:text-[#ffba66] bg-[#f0a144]/10 border border-[#f0a144]/30 px-2 py-0.5 rounded cursor-pointer"
+                        className="font-mono font-bold text-[#f0a144] hover:text-[#ffba66] bg-[#f0a144]/10 border border-[#f0a144]/30 px-2 py-0.5 rounded cursor-pointer transition-all active:scale-95"
                       >
                         {allBadgeText}
                       </button>
-                      <span className="font-mono text-gray-300">
+                      <span className="font-mono text-gray-300 text-right">
                         Corte neto: <span className="text-[#f0a144] font-bold">{cutInfo.largoCorte} × {cutInfo.anchoCorte} mm</span>
                         {cutInfo.tieneDescuento && (
-                          <span className="text-red-400 ml-1">(-{(cutInfo.descuentoLargoTotal + cutInfo.descuentoAnchoTotal).toFixed(1)}mm)</span>
+                          <span className="text-red-400 ml-1 font-bold">(-{(cutInfo.descuentoLargoTotal + cutInfo.descuentoAnchoTotal).toFixed(1)}mm)</span>
                         )}
                       </span>
                     </div>
                   </div>
                 )}
 
+                {/* 4. Veta y Mecanizados (Ranura): 2 filas compactas que caben en móvil */}
                 {activeOptionTab === 'veta' && (
-                  <div className="flex flex-col gap-1.5 max-w-[320px]">
-                    {/* Fila 1: Control de Veta y Ranura */}
-                    <div className="flex items-center gap-1 overflow-x-auto pb-0.5">
+                  <div className="flex flex-col gap-1.5 w-full">
+                    {/* Fila 1: Control de Veta y Giro */}
+                    <div className="flex items-center gap-1 w-full justify-between">
                       <button
                         type="button"
                         onClick={handleToggleVeta}
-                        className={`px-2 py-1 rounded-lg border text-[8px] font-bold flex items-center gap-1 cursor-pointer transition-all shrink-0 ${
+                        className={`flex-1 py-1.5 px-2 rounded-lg border text-[8px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-all ${
                           selectedPiece.veta ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#141414] border-[#333] text-gray-400'
                         }`}
                       >
@@ -833,84 +936,91 @@ export default function ThreeViewerOverlay({
                           {selectedPiece.veta ? 'SÍ' : 'NO'}
                         </span>
                       </button>
+
                       <button
                         type="button"
                         onClick={() => handleSetOrientation('longitudinal')}
-                        className={`px-1.5 py-1 rounded-lg text-[8px] font-bold transition-all cursor-pointer shrink-0 ${
+                        className={`py-1.5 px-2 rounded-lg text-[8px] font-bold transition-all cursor-pointer ${
                           !isTransversal ? 'bg-[#f0a144] text-black font-black shadow-xs' : 'bg-[#1a1a1a] text-gray-400 hover:text-white border border-[#333]'
                         }`}
+                        title="Veta longitudinal (0° - A lo largo)"
                       >
                         0° Long
                       </button>
+
                       <button
                         type="button"
                         onClick={() => handleSetOrientation('transversal')}
-                        className={`px-1.5 py-1 rounded-lg text-[8px] font-bold transition-all cursor-pointer shrink-0 ${
+                        className={`py-1.5 px-2 rounded-lg text-[8px] font-bold transition-all cursor-pointer ${
                           isTransversal ? 'bg-[#f0a144] text-black font-black shadow-xs' : 'bg-[#1a1a1a] text-gray-400 hover:text-white border border-[#333]'
                         }`}
+                        title="Veta transversal (90° - A lo ancho)"
                       >
                         90° Trans
                       </button>
+
                       <button
                         type="button"
                         onClick={handleRotateVetaAndTexture}
-                        className="px-1.5 py-1 rounded-lg bg-[#222] hover:bg-[#333] border border-[#444] text-[#f0a144] text-[8px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
-                        title="Girar veta 90°"
+                        className="py-1.5 px-2 rounded-lg bg-[#222] hover:bg-[#333] border border-[#444] text-[#f0a144] text-[8px] font-bold flex items-center gap-1 cursor-pointer"
+                        title="Girar veta 90° (0°, 90°, 180°, 270°)"
                       >
                         <RotateCw className="w-2.5 h-2.5" />
                         <span>{currentVetaRot}°</span>
                       </button>
+                    </div>
+
+                    {/* Fila 2: Ranura y Escala UV */}
+                    <div className="flex items-center justify-between gap-1 pt-1 border-t border-white/5">
                       <button
                         type="button"
                         onClick={() => {
                           const nextRanura = !selectedPiece.ranurado;
                           onUpdatePiece(selectedPiece.id, { ranurado: nextRanura });
                         }}
-                        className={`px-1.5 py-1 rounded-lg border text-[8px] font-bold flex items-center gap-1 cursor-pointer transition-all shrink-0 ${
+                        className={`py-1 px-2 rounded-lg border text-[8px] font-bold flex items-center gap-1 cursor-pointer transition-all ${
                           selectedPiece.ranurado ? 'bg-amber-500/20 border-amber-500 text-white' : 'bg-[#141414] border-[#333] text-gray-400'
                         }`}
+                        title="Activar/desactivar ranura para fondo de cajón o trasera"
                       >
                         <span>RANURA:</span>
                         <span className={`px-1 py-0.2 rounded font-mono ${selectedPiece.ranurado ? 'bg-amber-400 text-black font-black' : 'bg-[#222]'}`}>
                           {selectedPiece.ranurado ? 'SÍ' : 'NO'}
                         </span>
                       </button>
-                    </div>
-
-                    {/* Fila 2: Escala UV y Limpieza */}
-                    <div className="flex items-center justify-between gap-1 pt-1 border-t border-white/5">
-                      <div className="flex items-center gap-0.5 bg-[#141414] px-1 py-0.5 rounded-lg border border-[#333]">
-                        <span className="text-[7.5px] font-mono text-gray-400 font-bold mr-0.5">UV:</span>
-                        {[-2, -1, 1, 2].map(s => {
-                          const cur = selectedPiece.faceTextureConfigs?.top?.repeatX ?? 1;
-                          const isCur = cur === s;
-                          return (
-                            <button
-                              key={s}
-                              type="button"
-                              onClick={() => {
-                                const updated = { ...(selectedPiece.faceTextureConfigs || {}) };
-                                const allFaces: PieceFaceKey[] = ['top', 'bottom', 'front', 'back', 'left', 'right'];
-                                allFaces.forEach(f => {
-                                  updated[f] = { repeatX: s, repeatY: s, rotation: updated[f]?.rotation || 0 };
-                                });
-                                if (isMultiPiece) {
-                                  selectedPieces.forEach(p => onUpdatePiece(p.id, { faceTextureConfigs: updated }));
-                                } else {
-                                  onUpdatePiece(selectedPiece.id, { faceTextureConfigs: updated });
-                                }
-                              }}
-                              className={`px-1 py-0.5 rounded text-[7.5px] font-mono transition-all cursor-pointer ${
-                                isCur ? 'bg-[#f0a144] text-black font-bold shadow-xs' : 'text-gray-300 hover:text-white hover:bg-white/10'
-                              }`}
-                            >
-                              {s}x
-                            </button>
-                          );
-                        })}
-                      </div>
 
                       <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-0.5 bg-[#141414] px-1 py-0.5 rounded-lg border border-[#333]">
+                          <span className="text-[7.5px] font-mono text-gray-400 font-bold mr-0.5">UV:</span>
+                          {[1, 2].map(s => {
+                            const cur = selectedPiece.faceTextureConfigs?.top?.repeatX ?? 1;
+                            const isCur = cur === s;
+                            return (
+                              <button
+                                key={s}
+                                type="button"
+                                onClick={() => {
+                                  const updated = { ...(selectedPiece.faceTextureConfigs || {}) };
+                                  const allFaces: PieceFaceKey[] = ['top', 'bottom', 'front', 'back', 'left', 'right'];
+                                  allFaces.forEach(f => {
+                                    updated[f] = { repeatX: s, repeatY: s, rotation: updated[f]?.rotation || 0 };
+                                  });
+                                  if (isMultiPiece) {
+                                    selectedPieces.forEach(p => onUpdatePiece(p.id, { faceTextureConfigs: updated }));
+                                  } else {
+                                    onUpdatePiece(selectedPiece.id, { faceTextureConfigs: updated });
+                                  }
+                                }}
+                                className={`px-1.5 py-0.5 rounded text-[7.5px] font-mono transition-all cursor-pointer ${
+                                  isCur ? 'bg-[#f0a144] text-black font-bold shadow-xs' : 'text-gray-300 hover:text-white hover:bg-white/10'
+                                }`}
+                              >
+                                {s}x
+                              </button>
+                            );
+                          })}
+                        </div>
+
                         <button
                           type="button"
                           onClick={() => {
@@ -922,59 +1032,23 @@ export default function ThreeViewerOverlay({
                               left: { repeatX: 1, repeatY: 1, rotation: 0 },
                               right: { repeatX: 1, repeatY: 1, rotation: 0 }
                             };
-                            const resetData = {
-                              vetaRotation: 0,
-                              vetaOrientacion: 'longitudinal' as const,
-                              faceTextureConfigs: defaultConfigs
-                            };
                             if (isMultiPiece) {
-                              selectedPieces.forEach(p => onUpdatePiece(p.id, resetData));
+                              selectedPieces.forEach(p => onUpdatePiece(p.id, { faceTextureConfigs: defaultConfigs }));
                             } else {
-                              onUpdatePiece(selectedPiece.id, resetData);
+                              onUpdatePiece(selectedPiece.id, { faceTextureConfigs: defaultConfigs });
                             }
                           }}
-                          className="px-1.5 py-0.5 rounded-lg bg-[#141414] hover:bg-[#242733] border border-[#373b4d] text-gray-200 hover:text-[#f0a144] text-[7.5px] font-bold flex items-center gap-0.5 cursor-pointer"
-                          title="Restablecer coordenadas UV"
+                          className="text-gray-400 hover:text-white p-1 rounded hover:bg-white/10 transition-colors cursor-pointer text-[7.5px]"
+                          title="Restablecer textura a escala estándar 1x"
                         >
-                          <RotateCcw className="w-2.5 h-2.5 text-[#f0a144]" />
-                          <span>1x·0°</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const defaultWhite = MATERIAL_MAP['Blanco'];
-                            const cleanData: Partial<Piece> = {
-                              material: 'Blanco',
-                              customColor: defaultWhite.color,
-                              customRoughness: defaultWhite.roughness,
-                              customMetalness: defaultWhite.metalness,
-                              customOpacity: 1.0,
-                              isGlass: false,
-                              isMirror: false,
-                              cantoColor: undefined,
-                              faceTextures: undefined,
-                              faceTextureConfigs: undefined,
-                              veta: false,
-                              vetaRotation: 0,
-                              vetaOrientacion: 'longitudinal'
-                            };
-                            if (isMultiPiece) {
-                              selectedPieces.forEach(p => onUpdatePiece(p.id, cleanData));
-                            } else {
-                              onUpdatePiece(selectedPiece.id, cleanData);
-                            }
-                          }}
-                          className="px-1.5 py-0.5 rounded-lg bg-red-950/40 hover:bg-red-900/60 border border-red-800/50 text-red-300 text-[7.5px] font-bold flex items-center gap-0.5 cursor-pointer"
-                          title="Limpiar UV"
-                        >
-                          <Trash2 className="w-2.5 h-2.5 text-red-400" />
-                          <span>Limpiar</span>
+                          <RotateCcw className="w-2.5 h-2.5" />
                         </button>
                       </div>
                     </div>
                   </div>
                 )}
 
+                {/* 5. Acciones: Entrada/Salida a grupos + Duplicar + Distribuir */}
                 {activeOptionTab === 'acciones' && (() => {
                   let clearanceInfo: {
                     name1: string;
@@ -1010,7 +1084,45 @@ export default function ThreeViewerOverlay({
                   }
 
                   return (
-                    <div className="flex flex-col gap-1.5 max-w-[300px] w-full text-white">
+                    <div className="flex flex-col gap-1.5 w-full text-white">
+                      {/* Control contextual de GRUPO si la pieza pertenece a un grupo */}
+                      {selectedPiece.groupId && (() => {
+                        const grp = groups?.find(g => g.id === selectedPiece.groupId);
+                        const grpName = grp?.name || 'Grupo';
+                        return (
+                          <div className="flex items-center justify-between gap-1.5 bg-cyan-950/40 border border-cyan-500/30 rounded-lg p-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <Group className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                              <div className="flex flex-col min-w-0 leading-tight">
+                                <span className="text-[8px] text-cyan-300 font-bold truncate max-w-[140px]">{grpName}</span>
+                                <span className="text-[7px] text-cyan-400/70 font-mono">
+                                  {editingGroupId ? 'Editando piezas dentro' : 'Grupo completo'}
+                                </span>
+                              </div>
+                            </div>
+                            {!editingGroupId ? (
+                              <button
+                                type="button"
+                                onClick={() => onEnterGroup?.(selectedPiece.groupId!)}
+                                className="py-1 px-2.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-black font-black text-[8px] uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-all active:scale-95 shadow-sm shrink-0"
+                              >
+                                <FolderOpen className="w-3 h-3" />
+                                <span>Entrar al grupo</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={onExitGroup}
+                                className="py-1 px-2.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-black font-black text-[8px] uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-all active:scale-95 shadow-sm shrink-0"
+                              >
+                                <Check className="w-3 h-3" />
+                                <span>Salir del grupo</span>
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+
                       {/* Fila Selector Minimalista de Modo */}
                       <div className="flex items-center justify-between gap-1 bg-[#101010] p-0.5 rounded-lg border border-white/5">
                         <div className="flex items-center gap-0.5 flex-1">
@@ -1082,7 +1194,7 @@ export default function ThreeViewerOverlay({
                               <button
                                 type="button"
                                 onClick={() => onChangeArrayCount?.(Math.max(1, (arrayCount || 3) - 1))}
-                                className="w-4 h-4 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
+                                className="w-5 h-5 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
                               >
                                 -
                               </button>
@@ -1090,7 +1202,7 @@ export default function ThreeViewerOverlay({
                               <button
                                 type="button"
                                 onClick={() => onChangeArrayCount?.(Math.min(20, (arrayCount || 3) + 1))}
-                                className="w-4 h-4 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
+                                className="w-5 h-5 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
                               >
                                 +
                               </button>
@@ -1113,7 +1225,7 @@ export default function ThreeViewerOverlay({
                               type="button"
                               onClick={onExecuteDistribution}
                               disabled={selectedPieceIds.length < 2}
-                              className="flex-1 py-1 px-2 rounded-lg bg-[#f0a144] hover:bg-[#e09134] disabled:opacity-30 disabled:hover:bg-[#f0a144] text-black text-[8px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-md cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
+                              className="flex-1 py-1.5 px-2 rounded-lg bg-[#f0a144] hover:bg-[#ffba66] disabled:opacity-30 disabled:hover:bg-[#f0a144] text-black text-[8px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-md cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
                             >
                               <Rows3 className="w-3 h-3 text-black" />
                               <span>Distribuir</span>
@@ -1146,7 +1258,7 @@ export default function ThreeViewerOverlay({
                               <button
                                 type="button"
                                 onClick={() => onChangeArrayCount?.(Math.max(1, (arrayCount || 3) - 1))}
-                                className="w-4 h-4 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
+                                className="w-5 h-5 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
                               >
                                 -
                               </button>
@@ -1154,7 +1266,7 @@ export default function ThreeViewerOverlay({
                               <button
                                 type="button"
                                 onClick={() => onChangeArrayCount?.(Math.min(20, (arrayCount || 3) + 1))}
-                                className="w-4 h-4 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
+                                className="w-5 h-5 rounded bg-[#222] hover:bg-[#333] text-white font-bold flex items-center justify-center text-[10px] cursor-pointer"
                               >
                                 +
                               </button>
@@ -1175,7 +1287,7 @@ export default function ThreeViewerOverlay({
                           <button
                             type="button"
                             onClick={onExecuteDistribution}
-                            className="w-full py-1 px-2 rounded-lg bg-[#3b82f6] hover:bg-[#2563eb] text-white text-[8px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-md cursor-pointer"
+                            className="w-full py-1.5 px-2 rounded-lg bg-[#3b82f6] hover:bg-[#2563eb] text-white text-[8px] font-black uppercase tracking-wider flex items-center justify-center gap-1 transition-all active:scale-[0.98] shadow-md cursor-pointer"
                           >
                             <CopyPlus className="w-3 h-3 text-white" />
                             <span>Multiplicar en Serie</span>
@@ -1189,18 +1301,19 @@ export default function ThreeViewerOverlay({
             );
           })()}
 
-          {/* Dock Pill con Pestañas de Opciones Segmentadas */}
+          {/* Dock Pill con Pestañas de Opciones Segmentadas: 100% Adaptada a Móvil */}
           {selectedPiece ? (
-            <div className="flex items-center bg-[#141414]/95 backdrop-blur-md rounded-full p-1 border border-[#2a2a2a] shadow-2xl max-w-[96vw] overflow-x-auto no-scrollbar gap-0.5 sm:gap-1">
+            <div className="flex items-center justify-between bg-[#141414]/95 backdrop-blur-md rounded-full p-1 border border-[#2a2a2a] shadow-2xl w-full max-w-[390px] sm:max-w-md gap-0.5 sm:gap-1">
               <button
                 type="button"
                 onClick={() => setActiveOptionTab(activeOptionTab === 'medidas' ? null : 'medidas')}
-                className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full flex items-center gap-1 text-[8px] sm:text-[9px] font-bold uppercase transition-all shrink-0 cursor-pointer ${
-                  activeOptionTab === 'medidas' ? 'bg-[#f0a144] text-black shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'
+                className={`flex-1 min-w-0 py-1.5 px-0.5 sm:px-2 rounded-full flex items-center justify-center gap-0.5 sm:gap-1 text-[7px] min-[360px]:text-[7.5px] min-[400px]:text-[8.5px] sm:text-[9px] font-bold uppercase transition-all shrink cursor-pointer ${
+                  activeOptionTab === 'medidas' ? 'bg-[#f0a144] text-black shadow-md font-black' : 'text-gray-400 hover:text-white hover:bg-white/5'
                 }`}
+                title="Medidas de la pieza (Largo, Espesor, Ancho)"
               >
-                <Ruler className="w-3 h-3" />
-                <span>Medidas</span>
+                <Ruler className="w-2.5 h-2.5 min-[360px]:w-3 min-[360px]:h-3 shrink-0" />
+                <span className="truncate">Medidas</span>
               </button>
 
               <button
@@ -1212,49 +1325,53 @@ export default function ThreeViewerOverlay({
                     setActiveOptionTab(activeOptionTab === 'material' ? null : 'material');
                   }
                 }}
-                className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full flex items-center gap-1 text-[8px] sm:text-[9px] font-bold uppercase transition-all shrink-0 cursor-pointer ${
-                  isTextureModalOpen || activeOptionTab === 'material' ? 'bg-[#f0a144] text-black shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'
+                className={`flex-1 min-w-0 py-1.5 px-0.5 sm:px-2 rounded-full flex items-center justify-center gap-0.5 sm:gap-1 text-[7px] min-[360px]:text-[7.5px] min-[400px]:text-[8.5px] sm:text-[9px] font-bold uppercase transition-all shrink cursor-pointer ${
+                  isTextureModalOpen || activeOptionTab === 'material' ? 'bg-[#f0a144] text-black shadow-md font-black' : 'text-gray-400 hover:text-white hover:bg-white/5'
                 }`}
+                title="Material y texturas"
               >
-                <Palette className="w-3 h-3" />
-                <span>Material</span>
+                <Palette className="w-2.5 h-2.5 min-[360px]:w-3 min-[360px]:h-3 shrink-0" />
+                <span className="truncate">Material</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setActiveOptionTab(activeOptionTab === 'cantos' ? null : 'cantos')}
-                className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full flex items-center gap-1 text-[8px] sm:text-[9px] font-bold uppercase transition-all shrink-0 cursor-pointer ${
-                  activeOptionTab === 'cantos' ? 'bg-[#f0a144] text-black shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'
+                className={`flex-1 min-w-0 py-1.5 px-0.5 sm:px-2 rounded-full flex items-center justify-center gap-0.5 sm:gap-1 text-[7px] min-[360px]:text-[7.5px] min-[400px]:text-[8.5px] sm:text-[9px] font-bold uppercase transition-all shrink cursor-pointer ${
+                  activeOptionTab === 'cantos' ? 'bg-[#f0a144] text-black shadow-md font-black' : 'text-gray-400 hover:text-white hover:bg-white/5'
                 }`}
+                title="Tapacantos (L1, L2, A1, A2)"
               >
-                <Layers className="w-3 h-3" />
-                <span>Cantos</span>
+                <Layers className="w-2.5 h-2.5 min-[360px]:w-3 min-[360px]:h-3 shrink-0" />
+                <span className="truncate">Cantos</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setActiveOptionTab(activeOptionTab === 'veta' ? null : 'veta')}
-                className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full flex items-center gap-1 text-[8px] sm:text-[9px] font-bold uppercase transition-all shrink-0 cursor-pointer ${
-                  activeOptionTab === 'veta' ? 'bg-[#f0a144] text-black shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'
+                className={`flex-1 min-w-0 py-1.5 px-0.5 sm:px-2 rounded-full flex items-center justify-center gap-0.5 sm:gap-1 text-[7px] min-[360px]:text-[7.5px] min-[400px]:text-[8.5px] sm:text-[9px] font-bold uppercase transition-all shrink cursor-pointer ${
+                  activeOptionTab === 'veta' ? 'bg-[#f0a144] text-black shadow-md font-black' : 'text-gray-400 hover:text-white hover:bg-white/5'
                 }`}
+                title="Veta y Mecanizados (Ranura)"
               >
-                <Sliders className="w-3 h-3" />
-                <span>Veta/Mec</span>
+                <Sliders className="w-2.5 h-2.5 min-[360px]:w-3 min-[360px]:h-3 shrink-0" />
+                <span className="truncate">Veta/Mec</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setActiveOptionTab(activeOptionTab === 'acciones' ? null : 'acciones')}
-                className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-full flex items-center gap-1 text-[8px] sm:text-[9px] font-bold uppercase transition-all shrink-0 cursor-pointer ${
-                  activeOptionTab === 'acciones' ? 'bg-[#f0a144] text-black shadow-md' : 'text-gray-400 hover:text-white hover:bg-white/5'
+                className={`flex-1 min-w-0 py-1.5 px-0.5 sm:px-2 rounded-full flex items-center justify-center gap-0.5 sm:gap-1 text-[7px] min-[360px]:text-[7.5px] min-[400px]:text-[8.5px] sm:text-[9px] font-bold uppercase transition-all shrink cursor-pointer ${
+                  activeOptionTab === 'acciones' ? 'bg-[#f0a144] text-black shadow-md font-black' : 'text-gray-400 hover:text-white hover:bg-white/5'
                 }`}
+                title="Acciones (Duplicar, Distribuir, Eliminar)"
               >
-                <Zap className="w-3 h-3" />
-                <span>Acciones</span>
+                <Zap className="w-2.5 h-2.5 min-[360px]:w-3 min-[360px]:h-3 shrink-0" />
+                <span className="truncate">Acciones</span>
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-1.5 bg-[#141414]/90 backdrop-blur-md rounded-full px-3 py-1 border border-white/10 shadow-xl text-gray-400 text-[8px] sm:text-[9px]">
+            <div className="flex items-center gap-1.5 bg-[#141414]/90 backdrop-blur-md rounded-full px-3 py-1.5 border border-white/10 shadow-xl text-gray-400 text-[8px] sm:text-[9px]">
               <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144] animate-pulse" />
               <span>Toca una pieza para editar medidas, cantos y material</span>
             </div>
@@ -1343,6 +1460,13 @@ export default function ThreeViewerOverlay({
                   onClick={() => onChangeTransformMode('scale')}
                   title="Dimensionar medidas con gizmo"
                   label="Dimens."
+                />
+                <RightToolButton
+                  icon={<Maximize2 className="w-4 h-4" />}
+                  active={transformMode === 'stretch'}
+                  onClick={() => onChangeTransformMode('stretch')}
+                  title="Estirado Inteligente: estirar grupo sin deformar espesores [E]"
+                  label="Estirar"
                 />
               </div>
             )}
@@ -1683,7 +1807,7 @@ function EntityCantoField({ label, sub, value, gruesoMm = 3, delgadoMm = 0.45, o
         onCycle(true);
       }}
       title={`${label} (${sub}): Clic para alternar (NO → DEL ${delgadoMm}mm → GRU ${gruesoMm}mm con descuento para corte)`}
-      className={`bg-[#0e0e0e] border rounded-lg px-2 py-1.5 flex items-center justify-between transition-all cursor-pointer select-none group text-left active:scale-[0.98] ${borderClass}`}
+      className={`bg-[#0e0e0e] border rounded-lg px-2 py-1.5 flex items-center justify-between transition-all cursor-pointer select-none group text-left active:scale-[0.98] w-full ${borderClass}`}
     >
       <div className="flex flex-col">
         <span className="text-[8.5px] font-bold text-gray-200 uppercase tracking-tight group-hover:text-white transition-colors">{label}</span>

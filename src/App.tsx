@@ -1,10 +1,11 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, ChevronLeft, PanelRight, Ruler, Package, Sliders, RotateCcw, RotateCw, FileSpreadsheet, FileText, Check, Copy, ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Move, Expand, CornerDownLeft, Palette, Image as ImageIcon, Eye, EyeOff, GripHorizontal } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, ChevronLeft, PanelRight, Ruler, Package, Sliders, RotateCcw, RotateCw, FileSpreadsheet, FileText, Check, Copy, ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Move, Expand, CornerDownLeft, Palette, Image as ImageIcon, Eye, EyeOff, GripHorizontal, Maximize2 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 import { interpretFurnitureImage } from './lib/gemini';
 import { Piece, EdgeConfig, Group3D, DynamicFurnitureItem, EdgeThicknessConfig, PieceFaceKey } from './types';
 import { DEFAULT_EDGE_THICKNESS_CONFIG, calculatePieceCutDimensions } from './lib/edgeCalculations';
+import { FredoStretchAxis, FredoStretchMode, calculateFredoStretch, computePiecesBoundingBoxMm } from './lib/fredoStretch';
 import ThreeViewer, { MATERIAL_MAP, getMaterialEmoji, getGroupedMaterials } from './components/ThreeViewer';
 import CutPlanViewer from './components/CutPlanViewer';
 import ThreeViewerOverlay from './components/ThreeViewerOverlay';
@@ -15,6 +16,7 @@ import MaterialBrowserModal from './components/MaterialBrowserModal';
 import { calculateSnapToFloorDeltaY } from './lib/geometry3D';
 import { useDraggableWindow } from './hooks/useDraggableWindow';
 import { DEFAULT_FURNITURE_CATEGORIES, DEFAULT_FURNITURE_CATALOG } from './data/defaultFurniture';
+import { SmartStretchToolbar } from './components/SmartStretchToolbar';
 
 type ViewMode = '3d' | '2d' | 'warehouse';
 
@@ -202,8 +204,16 @@ export default function App() {
     margin: 10
   });
   const [multiSelectMode, setMultiSelectMode] = useState(false);
-  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale' | 'texture'>('translate');
+  const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale' | 'texture' | 'stretch'>('translate');
   const [snapActive, setSnapActive] = useState(true);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+
+  // FredoScale Box Stretch state (estirar sin deformar espesor)
+  const [fredoAxis, setFredoAxis] = useState<FredoStretchAxis>('X');
+  const [fredoMode, setFredoMode] = useState<FredoStretchMode>('anchor-neg');
+  const [fredoPlaneRatio, setFredoPlaneRatio] = useState<number>(0.5);
+  const [fredoPreviewDelta, setFredoPreviewDelta] = useState<number>(0);
+  const [fredoInputText, setFredoInputText] = useState<string>('');
   const [didacticGuideOpen, setDidacticGuideOpen] = useState(false);
   const [activeDisplacement, setActiveDisplacement] = useState<{ dx: number; dy: number; dz: number; dist: number; isDragging?: boolean; isFloorSnapped?: boolean } | null>(null);
   const [activeRotation, setActiveRotation] = useState<{ dRotX: number; dRotY: number; dRotZ: number; angle: number; axis?: string; isDragging?: boolean } | null>(null);
@@ -538,6 +548,72 @@ export default function App() {
     return () => window.removeEventListener('request-transform-mode', handleRequestTransformMode as EventListener);
   }, []);
 
+  const fredoCurrentDim = useMemo(() => {
+    if (selectedPieceIds.length === 0) return 0;
+    const targetPieces = pieces.filter(p => selectedPieceIds.includes(p.id) && !p.hidden);
+    if (targetPieces.length === 0) return 0;
+    const bounds = computePiecesBoundingBoxMm(targetPieces);
+    const axisIdx = fredoAxis === 'X' ? 0 : fredoAxis === 'Y' ? 1 : 2;
+    return bounds.size.getComponent(axisIdx);
+  }, [pieces, selectedPieceIds, fredoAxis]);
+
+  const handleCommitFredoStretch = useCallback((updatedPieces: Piece[]) => {
+    setAppState(prev => {
+      const updateMap = new Map(updatedPieces.map(p => [p.id, p]));
+      const nextPieces = prev.pieces.map(p => updateMap.has(p.id) ? updateMap.get(p.id)! : p);
+      return {
+        ...prev,
+        pieces: nextPieces
+      };
+    });
+    setFredoInputText('');
+    setFredoPreviewDelta(0);
+    showToast('¡Estirado Inteligente aplicado con éxito! (Espesores conservados)');
+  }, []);
+
+  const handleApplyFredoNumericStretch = useCallback((targetOrDeltaMm: number, isAbsolute: boolean = false) => {
+    if (selectedPieceIds.length === 0) return;
+    const targetPieces = pieces.filter(p => selectedPieceIds.includes(p.id) && !p.hidden);
+    if (targetPieces.length === 0) return;
+    const currentBounds = computePiecesBoundingBoxMm(targetPieces);
+    const axisIdx = fredoAxis === 'X' ? 0 : fredoAxis === 'Y' ? 1 : 2;
+    const currentDim = currentBounds.size.getComponent(axisIdx);
+
+    let deltaMm = targetOrDeltaMm;
+    if (isAbsolute) {
+      deltaMm = targetOrDeltaMm - currentDim;
+    }
+
+    if (Math.abs(deltaMm) < 0.5) return;
+
+    const result = calculateFredoStretch({
+      pieces: targetPieces,
+      axis: fredoAxis,
+      planeRatio: fredoPlaneRatio,
+      mode: fredoMode,
+      deltaMm: Math.round(deltaMm),
+      initialBounds: currentBounds
+    });
+
+    handleCommitFredoStretch(result.updatedPieces);
+  }, [selectedPieceIds, pieces, fredoAxis, fredoPlaneRatio, fredoMode, handleCommitFredoStretch]);
+
+  const handleCommitFredoInput = (customText?: string) => {
+    const raw = (customText !== undefined ? customText : fredoInputText).trim();
+    if (!raw) return;
+    if (raw.startsWith('+') || raw.startsWith('-')) {
+      const val = parseFloat(raw);
+      if (!isNaN(val)) handleApplyFredoNumericStretch(val, false);
+    } else {
+      const val = parseFloat(raw);
+      if (!isNaN(val)) handleApplyFredoNumericStretch(val, true);
+    }
+  };
+
+  const handleQuickFredoStep = (stepMm: number) => {
+    handleApplyFredoNumericStretch(stepMm, false);
+  };
+
   const handleGroupPieces = () => {
     if (selectedPieceIds.length < 2) return;
     const newGroupId = uuidv4();
@@ -557,6 +633,7 @@ export default function App() {
 
   const handleUngroupPieces = () => {
     if (selectedPieceIds.length === 0) return;
+    setEditingGroupId(null);
     
     setAppState(prev => {
       const groupsToKeep = new Set<string>();
@@ -578,11 +655,15 @@ export default function App() {
 
   const toggleSelection = (id: string | null, multi: boolean = false) => {
     if (!id) {
-       setSelectedPieceIds([]);
-       setTextureEditingPieceId(null);
-       setIsTextureModalOpen(false);
-       if (window.innerWidth < 1024) {
-         setIsTrayOpen(false);
+       if (editingGroupId) {
+         setSelectedPieceIds([]);
+       } else {
+         setSelectedPieceIds([]);
+         setTextureEditingPieceId(null);
+         setIsTextureModalOpen(false);
+         if (window.innerWidth < 1024) {
+           setIsTrayOpen(false);
+         }
        }
        if (transformMode === 'texture') {
          setTransformMode('translate');
@@ -591,8 +672,24 @@ export default function App() {
     }
     
     const isMulti = multi || multiSelectMode;
-
     const piece = pieces.find(p => p.id === id);
+
+    // Si estamos dentro de un grupo editando sus piezas:
+    if (editingGroupId) {
+      if (piece?.groupId === editingGroupId) {
+        setTextureEditingPieceId(id);
+        if (isMulti) {
+          setSelectedPieceIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
+        } else {
+          setSelectedPieceIds([id]);
+        }
+        return;
+      } else {
+        // Clic a otra pieza fuera del grupo: salimos del grupo
+        setEditingGroupId(null);
+      }
+    }
+
     const pieceGroupId = piece?.groupId;
     const idsToSelect = pieceGroupId ? pieces.filter(p => p.groupId === pieceGroupId).map(p => p.id) : [id];
     setTextureEditingPieceId(idsToSelect[0] || id);
@@ -614,6 +711,13 @@ export default function App() {
   const handleLongPressPiece = (pieceId: string) => {
     setMultiSelectMode(true);
     const piece = pieces.find(p => p.id === pieceId);
+    if (editingGroupId && piece?.groupId === editingGroupId) {
+      setSelectedPieceIds(prev => Array.from(new Set([...prev, pieceId])));
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([40, 50, 40]);
+      }
+      return;
+    }
     const pieceGroupId = piece?.groupId;
     const idsToSelect = pieceGroupId ? pieces.filter(p => p.groupId === pieceGroupId).map(p => p.id) : [pieceId];
 
@@ -1009,6 +1113,13 @@ export default function App() {
         return;
       }
 
+      // Modo Estirar (FredoScale Stretch): Tecla E
+      if (e.key.toLowerCase() === 'e' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setTransformMode(prev => prev === 'stretch' ? 'translate' : 'stretch');
+        return;
+      }
+
       // Eliminar piezas seleccionadas: Supr / Delete / Backspace
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedPieceIds.length > 0) {
         e.preventDefault();
@@ -1016,10 +1127,15 @@ export default function App() {
         return;
       }
 
-      // Escape: Deseleccionar piezas o cerrar confirmación
+      // Escape: Deseleccionar piezas, salir de edición de grupo o cerrar confirmación
       if (e.key === 'Escape') {
         if (deleteConfirm) {
           setDeleteConfirm(null);
+        } else if (editingGroupId) {
+          const grpPieces = pieces.filter(p => p.groupId === editingGroupId);
+          setSelectedPieceIds(grpPieces.map(p => p.id));
+          setEditingGroupId(null);
+          showToast('Saliste del modo edición de grupo');
         } else if (selectedPieceIds.length > 0) {
           setSelectedPieceIds([]);
         }
@@ -1028,7 +1144,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, selectedPieceIds, deleteConfirm]);
+  }, [undo, redo, selectedPieceIds, deleteConfirm, editingGroupId, pieces]);
 
   // Export Menu State & Handlers
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
@@ -1594,10 +1710,31 @@ export default function App() {
                      }
                   }}
                   transformMode={transformMode}
+                  fredoAxis={fredoAxis}
+                  onChangeFredoAxis={setFredoAxis}
+                  fredoMode={fredoMode}
+                  onChangeFredoMode={setFredoMode}
+                  fredoPlaneRatio={fredoPlaneRatio}
+                  onChangeFredoPlaneRatio={setFredoPlaneRatio}
+                  fredoPreviewDelta={fredoPreviewDelta}
+                  onChangeFredoPreviewDelta={setFredoPreviewDelta}
+                  onCommitFredoStretch={handleCommitFredoStretch}
                   dimensionSide={dimensionSide}
                   anchorMode={anchorMode}
                   snapActive={snapActive}
-                  onDoubleClickPiece={(id) => handleOpenDimensionEditor(id, 'largo')}
+                  onDoubleClickPiece={(id) => {
+                    const p = pieces.find(x => x.id === id);
+                    if (p?.groupId && !editingGroupId) {
+                      setEditingGroupId(p.groupId);
+                      setSelectedPieceIds([id]);
+                      setTextureEditingPieceId(id);
+                      const grp = groups.find(g => g.id === p.groupId);
+                      showToast(`Entraste al grupo "${grp?.name || 'Grupo'}"`);
+                    } else {
+                      handleOpenDimensionEditor(id, 'largo');
+                    }
+                  }}
+                  editingGroupId={editingGroupId}
                   onEditDimensionAxis={(id, axis) => handleOpenDimensionEditor(id, axis)}
                   hide3DLabels={didacticGuideOpen}
                   isTextureModalOpen={isTextureModalOpen}
@@ -1700,6 +1837,25 @@ export default function App() {
                   onApplyDisplacementOffset={handleApplyDisplacementOffset}
                   onSnapToFloor={handleSnapSelectedPiecesToFloor}
                   onExecuteDistribution={executeDistribution}
+                  editingGroupId={editingGroupId}
+                  onEnterGroup={(groupId) => {
+                    setEditingGroupId(groupId);
+                    const grpPieces = pieces.filter(p => p.groupId === groupId);
+                    if (grpPieces.length > 0) {
+                      setSelectedPieceIds([grpPieces[0].id]);
+                      setTextureEditingPieceId(grpPieces[0].id);
+                    }
+                    const grp = groups.find(g => g.id === groupId);
+                    showToast(`Modo edición: editando piezas de "${grp?.name || 'Grupo'}"`);
+                  }}
+                  onExitGroup={() => {
+                    if (editingGroupId) {
+                      const grpPieces = pieces.filter(p => p.groupId === editingGroupId);
+                      setSelectedPieceIds(grpPieces.map(p => p.id));
+                    }
+                    setEditingGroupId(null);
+                    showToast('Saliste del modo edición de grupo');
+                  }}
                 />
               </>
             ) : (
@@ -1720,10 +1876,10 @@ export default function App() {
           </main>
 
           {/* Bottom Status Bar (Compact, consistent, and clean) */}
-          <footer className="h-6 bg-[#222222] border-t border-[#181818] flex items-center px-2 sm:px-4 justify-between text-[8.5px] sm:text-[9px] font-medium text-[#888888] shrink-0 whitespace-nowrap overflow-hidden select-none z-30">
-             <div className="flex items-center gap-2 sm:gap-3 overflow-hidden">
+          <footer className="min-h-[28px] sm:h-6 py-0.5 bg-[#222222] border-t border-[#181818] flex items-center px-1.5 sm:px-3 justify-between text-[8px] sm:text-[9px] font-medium text-[#888888] shrink-0 whitespace-nowrap overflow-x-auto [scrollbar-width:none] select-none z-30">
+             <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
                {/* Engine Status */}
-               <div className="flex items-center gap-1.5 text-[#cccccc] shrink-0">
+               <div className="flex items-center gap-1 text-[#cccccc] shrink-0">
                  <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144]" />
                  <span className="hidden md:inline font-bold text-gray-300">CAD Engine</span>
                </div>
@@ -1745,10 +1901,11 @@ export default function App() {
                  </div>
                ) : selectedPieceIds.length > 0 && transformMode === 'rotate' ? (
                  /* ROTATION MODE (Grados) */
-                 <div className="flex items-center gap-1.5 font-mono bg-[#141414] px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144] shrink-0">
-                   <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144]" />
-                   <span className="font-bold text-[9px] flex items-center gap-1">
-                     ROTACIÓN:
+                 <div className="flex items-center gap-1 sm:gap-1.5 font-mono bg-[#141414] px-1.5 sm:px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144] shrink-0">
+                   <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144] shrink-0" />
+                   <span className="font-bold text-[9px] sm:text-[9.5px] flex items-center gap-1 shrink-0">
+                     <span className="hidden sm:inline">ROTACIÓN:</span>
+                     <span className="sm:hidden">ROT:</span>
                      <input 
                        type="text"
                        value={activeRotation?.isDragging ? String(activeRotation.angle) : footerRotAngle}
@@ -1762,21 +1919,31 @@ export default function App() {
                          }
                        }}
                        placeholder={activeRotation && activeRotation.angle !== 0 ? String(activeRotation.angle) : "0"}
-                       title="Escribe los grados a rotar y presiona Enter"
-                       className="w-11 bg-black border border-[#444444] text-white px-1 py-0.2 rounded text-center text-[9px] font-black focus:border-[#f0a144] outline-none"
+                       title="Escribe los grados a rotar y presiona Enter o el botón ✓"
+                       className="w-11 sm:w-12 h-5 bg-black border border-[#444444] focus:border-[#f0a144] text-white px-1 rounded text-center text-[10px] font-mono font-black outline-none transition-colors"
                      />
-                     <span className="text-white font-bold">°</span>
+                     <span className="text-white font-bold text-[8.5px] sm:text-[9px]">°</span>
                    </span>
 
+                   {/* Botón Aplicar para móvil */}
+                   <button
+                     type="button"
+                     onClick={handleCommitRotate}
+                     className="w-4 h-4 sm:w-5 sm:h-5 bg-[#f0a144] hover:bg-[#ffb055] text-black font-black text-[9px] sm:text-[10px] rounded flex items-center justify-center cursor-pointer active:scale-95 transition-transform shrink-0"
+                     title="Aplicar rotación (Enter)"
+                   >
+                     ✓
+                   </button>
+
                    {/* Mini Eje Selector */}
-                   <div className="flex items-center gap-0.5 border-l border-[#333333] pl-1.5">
+                   <div className="flex items-center gap-0.5 border-l border-[#333333] pl-1 sm:pl-1.5 shrink-0">
                      {(['X', 'Y', 'Z'] as const).map(ax => (
                        <button
                          key={ax}
                          type="button"
                          onClick={() => setFooterRotAxis(ax)}
-                         className={`px-1 py-0.2 rounded text-[8px] font-bold cursor-pointer transition-colors ${
-                           footerRotAxis === ax ? 'bg-[#f0a144] text-black' : 'text-gray-400 hover:text-white'
+                         className={`w-4 h-4 sm:w-auto sm:px-1 sm:py-0.2 rounded text-[8.5px] sm:text-[8px] font-bold flex items-center justify-center cursor-pointer transition-colors ${
+                           footerRotAxis === ax ? 'bg-[#f0a144] text-black font-black' : 'text-gray-400 hover:text-white'
                          }`}
                          title={`Eje ${ax}`}
                        >
@@ -1786,19 +1953,20 @@ export default function App() {
                    </div>
 
                    {activeRotation && activeRotation.angle !== 0 ? (
-                     <span className="text-gray-300 text-[8px] sm:text-[9px] border-l border-[#3a3a3a] pl-1.5 font-semibold">
-                       Giro: <span className="text-white font-bold">{activeRotation.angle}°</span>
+                     <span className="text-gray-300 text-[8px] sm:text-[9px] border-l border-[#3a3a3a] pl-1 sm:pl-1.5 font-semibold shrink-0">
+                       <span className="hidden sm:inline">Giro: </span><span className="text-white font-bold">{activeRotation.angle}°</span>
                      </span>
                    ) : (
-                     <span className="text-gray-400 text-[8px] border-l border-[#3a3a3a] pl-1.5 font-sans">(Eje {footerRotAxis})</span>
+                     <span className="text-gray-400 text-[8px] border-l border-[#3a3a3a] pl-1.5 font-sans shrink-0 hidden sm:inline">(Eje {footerRotAxis})</span>
                    )}
                  </div>
                ) : selectedPieceIds.length > 0 && transformMode === 'translate' ? (
                  /* MOVEMENT MODE (Distancia mm) */
-                 <div className="flex items-center gap-1.5 font-mono bg-[#141414] px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144] shrink-0">
-                   <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144]" />
-                   <span className="font-bold text-[9px] flex items-center gap-1">
-                     DISTANCIA:
+                 <div className="flex items-center gap-1 sm:gap-1.5 font-mono bg-[#141414] px-1.5 sm:px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144] shrink-0">
+                   <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144] shrink-0" />
+                   <span className="font-bold text-[9px] sm:text-[9.5px] flex items-center gap-1 shrink-0">
+                     <span className="hidden sm:inline">DISTANCIA:</span>
+                     <span className="sm:hidden">DIST:</span>
                      <input 
                        type="text"
                        value={activeDisplacement?.isDragging ? String(activeDisplacement.dist) : footerMoveDist}
@@ -1812,21 +1980,31 @@ export default function App() {
                          }
                        }}
                        placeholder={activeDisplacement && activeDisplacement.dist > 0 ? String(activeDisplacement.dist) : "0"}
-                       title="Escribe la medida en mm y presiona Enter para mover"
-                       className="w-12 bg-black border border-[#444444] text-white px-1 py-0.2 rounded text-center text-[9px] font-black focus:border-[#f0a144] outline-none"
+                       title="Escribe la medida en mm y presiona Enter o el botón ✓ para mover"
+                       className="w-12 sm:w-14 h-5 bg-black border border-[#444444] focus:border-[#f0a144] text-white px-1 rounded text-center text-[10px] font-mono font-black outline-none transition-colors"
                      />
-                     <span className="text-white font-bold">mm</span>
+                     <span className="text-white font-bold text-[8.5px] sm:text-[9px]">mm</span>
                    </span>
 
+                   {/* Botón Aplicar para móvil */}
+                   <button
+                     type="button"
+                     onClick={handleCommitMove}
+                     className="w-4 h-4 sm:w-5 sm:h-5 bg-[#f0a144] hover:bg-[#ffb055] text-black font-black text-[9px] sm:text-[10px] rounded flex items-center justify-center cursor-pointer active:scale-95 transition-transform shrink-0"
+                     title="Aplicar desplazamiento (Enter)"
+                   >
+                     ✓
+                   </button>
+
                    {/* Mini Eje Selector */}
-                   <div className="flex items-center gap-0.5 border-l border-[#333333] pl-1.5">
+                   <div className="flex items-center gap-0.5 border-l border-[#333333] pl-1 sm:pl-1.5 shrink-0">
                      {(['X', 'Y', 'Z'] as const).map(ax => (
                        <button
                          key={ax}
                          type="button"
                          onClick={() => setFooterMoveAxis(ax)}
-                         className={`px-1 py-0.2 rounded text-[8px] font-bold cursor-pointer transition-colors ${
-                           footerMoveAxis === ax ? 'bg-[#f0a144] text-black' : 'text-gray-400 hover:text-white'
+                         className={`w-4 h-4 sm:w-auto sm:px-1 sm:py-0.2 rounded text-[8.5px] sm:text-[8px] font-bold flex items-center justify-center cursor-pointer transition-colors ${
+                           footerMoveAxis === ax ? 'bg-[#f0a144] text-black font-black' : 'text-gray-400 hover:text-white'
                          }`}
                          title={`Eje ${ax}`}
                        >
@@ -1836,11 +2014,11 @@ export default function App() {
                    </div>
 
                    {activeDisplacement && activeDisplacement.dist > 0 ? (
-                     <span className="text-gray-300 text-[8px] sm:text-[9px] border-l border-[#3a3a3a] pl-1.5 font-semibold shrink-0">
-                       Movido: <span className="text-white font-bold">{activeDisplacement.dist} mm</span>
+                     <span className="text-gray-300 text-[8px] sm:text-[9px] border-l border-[#3a3a3a] pl-1 sm:pl-1.5 font-semibold shrink-0">
+                       <span className="hidden sm:inline">Movido: </span><span className="text-white font-bold">{activeDisplacement.dist} mm</span>
                      </span>
                    ) : (
-                     <span className="text-gray-400 text-[8px] border-l border-[#3a3a3a] pl-1.5 font-sans shrink-0">(Eje {footerMoveAxis})</span>
+                     <span className="text-gray-400 text-[8px] border-l border-[#3a3a3a] pl-1.5 font-sans shrink-0 hidden sm:inline">(Eje {footerMoveAxis})</span>
                    )}
 
                    {/* Deltas visibles unicamente cuando se está arrastrando activamente */}
@@ -1854,10 +2032,11 @@ export default function App() {
                  </div>
                ) : selectedPieceIds.length > 0 && transformMode === 'scale' ? (
                  /* DIMENSIONING MODE (Cuánto moví el gizmo / Medida mm) */
-                 <div className="flex items-center gap-1.5 font-mono bg-[#141414] px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144] shrink-0">
-                   <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144]" />
-                   <span className="font-bold text-[9px] flex items-center gap-1">
-                     MEDIDA:
+                 <div className="flex items-center gap-1 sm:gap-1.5 font-mono bg-[#141414] px-1.5 sm:px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144] shrink-0">
+                   <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144] shrink-0" />
+                   <span className="font-bold text-[9px] sm:text-[9.5px] flex items-center gap-1 shrink-0">
+                     <span className="hidden sm:inline">MEDIDA:</span>
+                     <span className="sm:hidden">MED:</span>
                      <input 
                        type="text"
                        value={
@@ -1879,14 +2058,24 @@ export default function App() {
                            ? (activeScaling.delta > 0 ? `+${activeScaling.delta}` : String(activeScaling.delta))
                            : "0"
                        }
-                       title="Escribe la medida final o variación (+/-) en mm y presiona Enter"
-                       className="w-12 bg-black border border-[#444444] text-white px-1 py-0.2 rounded text-center text-[9px] font-black focus:border-[#f0a144] outline-none"
+                       title="Escribe la medida final o variación (+/-) en mm y presiona Enter o el botón ✓"
+                       className="w-12 sm:w-14 h-5 bg-black border border-[#444444] focus:border-[#f0a144] text-white px-1 rounded text-center text-[10px] font-mono font-black outline-none transition-colors"
                      />
-                     <span className="text-white font-bold">mm</span>
+                     <span className="text-white font-bold text-[8.5px] sm:text-[9px]">mm</span>
                    </span>
 
+                   {/* Botón Aplicar para móvil */}
+                   <button
+                     type="button"
+                     onClick={handleCommitScale}
+                     className="w-4 h-4 sm:w-5 sm:h-5 bg-[#f0a144] hover:bg-[#ffb055] text-black font-black text-[9px] sm:text-[10px] rounded flex items-center justify-center cursor-pointer active:scale-95 transition-transform shrink-0"
+                     title="Aplicar medida (Enter)"
+                   >
+                     ✓
+                   </button>
+
                    {/* Selector de Dimensión / Eje (X: Largo, Y: Espesor, Z: Ancho) */}
-                   <div className="flex items-center gap-0.5 border-l border-[#333333] pl-1.5">
+                   <div className="flex items-center gap-0.5 border-l border-[#333333] pl-1 sm:pl-1.5 shrink-0">
                      {([
                        { key: 'largo', label: 'X', title: 'Largo (X)' },
                        { key: 'espesor', label: 'Y', title: 'Espesor (Y)' },
@@ -1896,8 +2085,8 @@ export default function App() {
                          key={key}
                          type="button"
                          onClick={() => setFooterScaleAxis(key)}
-                         className={`px-1 py-0.2 rounded text-[8px] font-bold cursor-pointer transition-colors ${
-                           (activeScaling?.axis || footerScaleAxis) === key ? 'bg-[#f0a144] text-black' : 'text-gray-400 hover:text-white'
+                         className={`w-4 h-4 sm:w-auto sm:px-1 sm:py-0.2 rounded text-[8.5px] sm:text-[8px] font-bold flex items-center justify-center cursor-pointer transition-colors ${
+                           (activeScaling?.axis || footerScaleAxis) === key ? 'bg-[#f0a144] text-black font-black' : 'text-gray-400 hover:text-white'
                          }`}
                          title={`Dimensión ${title}`}
                        >
@@ -1907,7 +2096,7 @@ export default function App() {
                    </div>
 
                    {/* Resumen del movimiento del gizmo y medida actual */}
-                   <span className="text-gray-300 text-[8px] sm:text-[9px] border-l border-[#3a3a3a] pl-1.5 font-semibold shrink-0">
+                   <span className="text-gray-300 text-[8px] sm:text-[9px] border-l border-[#3a3a3a] pl-1 sm:pl-1.5 font-semibold shrink-0 hidden sm:inline">
                      {activeScaling && activeScaling.isDragging ? (
                        <span>
                          {activeScaling.axis === 'largo' ? 'Largo' : activeScaling.axis === 'ancho' ? 'Ancho' : 'Espesor'}:{' '}
@@ -1965,7 +2154,7 @@ export default function App() {
                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#181818] border border-white/5 text-gray-300 font-medium">
                      <span className="text-gray-500">Modo:</span>
                      <span className="text-[#f0a144] font-bold">
-                       {transformMode === 'scale' ? 'Dimensionar' : transformMode === 'rotate' ? 'Rotar' : transformMode === 'texture' ? 'Textura' : 'Mover'}
+                       {transformMode === 'scale' ? 'Dimensionar' : transformMode === 'rotate' ? 'Rotar' : transformMode === 'texture' ? 'Textura' : transformMode === 'stretch' ? 'Estirado Inteligente' : 'Mover'}
                      </span>
                    </span>
                    <span className="text-gray-400 hidden xs:inline">
@@ -1984,7 +2173,7 @@ export default function App() {
                  </span>
                )}
                <span className="hidden sm:inline text-gray-400">Unidades: mm</span>
-               <span className="text-[#cccccc]">v0.5.0</span>
+               <span className={`text-[#cccccc] ${selectedPieceIds.length > 0 ? 'hidden sm:inline' : ''}`}>v0.5.0</span>
              </div>
           </footer>
         </div>
@@ -2368,11 +2557,11 @@ export default function App() {
                               </div>
 
                               {/* Mode Buttons */}
-                              <div className="grid grid-cols-4 gap-1">
+                              <div className="grid grid-cols-5 gap-1">
                                 <button
                                   type="button"
                                   onClick={() => setTransformMode('translate')}
-                                  className={`py-1.5 px-1 rounded flex flex-col items-center gap-0.5 text-[7.5px] font-bold transition-all cursor-pointer ${
+                                  className={`py-1.5 px-0.5 rounded flex flex-col items-center gap-0.5 text-[7px] font-bold transition-all cursor-pointer ${
                                     transformMode === 'translate' ? 'bg-[#f0a144] text-black shadow-md' : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c]'
                                   }`}
                                   title="Mover pieza en el espacio 3D (G)"
@@ -2383,7 +2572,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => setTransformMode('rotate')}
-                                  className={`py-1.5 px-1 rounded flex flex-col items-center gap-0.5 text-[7.5px] font-bold transition-all cursor-pointer ${
+                                  className={`py-1.5 px-0.5 rounded flex flex-col items-center gap-0.5 text-[7px] font-bold transition-all cursor-pointer ${
                                     transformMode === 'rotate' ? 'bg-[#f0a144] text-black shadow-md' : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c]'
                                   }`}
                                   title="Rotar libremente con gizmo en 3D (R)"
@@ -2394,7 +2583,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => setTransformMode('scale')}
-                                  className={`py-1.5 px-1 rounded flex flex-col items-center gap-0.5 text-[7.5px] font-bold transition-all cursor-pointer ${
+                                  className={`py-1.5 px-0.5 rounded flex flex-col items-center gap-0.5 text-[7px] font-bold transition-all cursor-pointer ${
                                     transformMode === 'scale' ? 'bg-[#f0a144] text-black shadow-md' : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c]'
                                   }`}
                                   title="Dimensionar medidas interactivas en 3D (S)"
@@ -2404,8 +2593,19 @@ export default function App() {
                                 </button>
                                 <button
                                   type="button"
+                                  onClick={() => setTransformMode('stretch')}
+                                  className={`py-1.5 px-0.5 rounded flex flex-col items-center gap-0.5 text-[7px] font-bold transition-all cursor-pointer ${
+                                    transformMode === 'stretch' ? 'bg-[#a3e635] text-black shadow-md font-black' : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c]'
+                                  }`}
+                                  title="Estirado Inteligente: estirar grupo sin deformar espesores (E)"
+                                >
+                                  <Maximize2 className="w-3.5 h-3.5" />
+                                  <span>Estirar</span>
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => handleOpenTextureEditor(currentPiece.id)}
-                                  className={`py-1.5 px-1 rounded flex flex-col items-center gap-0.5 text-[7.5px] font-bold transition-all cursor-pointer ${
+                                  className={`py-1.5 px-0.5 rounded flex flex-col items-center gap-0.5 text-[7px] font-bold transition-all cursor-pointer ${
                                     transformMode === 'texture' ? 'bg-[#f0a144] text-black shadow-md' : 'bg-[#222] text-gray-400 hover:text-white hover:bg-[#2c2c2c]'
                                   }`}
                                   title="Editor de texturas y fotos por cara"
@@ -2414,6 +2614,122 @@ export default function App() {
                                   <span>Textura</span>
                                 </button>
                               </div>
+
+                              {/* Estirado Inteligente In-Tray Config when in stretch mode */}
+                              {transformMode === 'stretch' && (
+                                <div className="p-2 bg-[#a3e635]/10 border border-[#a3e635]/30 rounded space-y-1.5 animate-in fade-in">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[7.5px] font-bold text-[#a3e635] uppercase">
+                                      Estirado Inteligente (Smart Stretch)
+                                    </span>
+                                    <span className="text-[7px] text-gray-400 font-mono">
+                                      {Math.round(fredoCurrentDim)} mm
+                                    </span>
+                                  </div>
+
+                                  <div className="flex items-center justify-between text-[8px]">
+                                    <span className="text-gray-400 font-medium">Eje:</span>
+                                    <div className="flex items-center gap-1">
+                                      {(['X', 'Y', 'Z'] as const).map(ax => (
+                                        <button
+                                          key={ax}
+                                          type="button"
+                                          onClick={() => setFredoAxis(ax)}
+                                          className={`px-2 py-0.5 rounded text-[8px] font-bold transition-colors ${
+                                            fredoAxis === ax ? 'bg-[#a3e635] text-black' : 'bg-[#1a1a1a] text-gray-400 hover:text-white'
+                                          }`}
+                                        >
+                                          {ax}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center justify-between text-[8px]">
+                                    <span className="text-gray-400 font-medium">Anclaje:</span>
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => setFredoMode('anchor-neg')}
+                                        className={`px-1.5 py-0.5 rounded text-[7.5px] font-bold transition-colors ${
+                                          fredoMode === 'anchor-neg' ? 'bg-[#a3e635] text-black' : 'bg-[#1a1a1a] text-gray-400 hover:text-white'
+                                        }`}
+                                      >
+                                        Anclado
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setFredoMode('center')}
+                                        className={`px-1.5 py-0.5 rounded text-[7.5px] font-bold transition-colors ${
+                                          fredoMode === 'center' ? 'bg-[#a3e635] text-black' : 'bg-[#1a1a1a] text-gray-400 hover:text-white'
+                                        }`}
+                                      >
+                                        Simétrico (Centro)
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center justify-between text-[8px]">
+                                    <span className="text-gray-400 font-medium">Malla:</span>
+                                    <div className="flex items-center gap-1">
+                                      {[
+                                        { r: 0.25, label: '25%' },
+                                        { r: 0.5, label: '50%' },
+                                        { r: 0.75, label: '75%' }
+                                      ].map(({ r, label }) => (
+                                        <button
+                                          key={label}
+                                          type="button"
+                                          onClick={() => setFredoPlaneRatio(r)}
+                                          className={`px-1.5 py-0.5 rounded text-[7.5px] font-bold transition-colors ${
+                                            Math.abs(fredoPlaneRatio - r) < 0.05 ? 'bg-cyan-500 text-black' : 'bg-[#1a1a1a] text-gray-400 hover:text-white'
+                                          }`}
+                                        >
+                                          {label}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1 pt-1 border-t border-[#a3e635]/20">
+                                    <input
+                                      type="text"
+                                      value={fredoInputText}
+                                      onChange={(e) => setFredoInputText(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') handleCommitFredoInput();
+                                      }}
+                                      placeholder="Medida o +/- mm"
+                                      className="flex-1 bg-[#0e0e0e] border border-[#333333] focus:border-[#a3e635] text-[9.5px] text-white px-2 py-0.5 rounded outline-none"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCommitFredoInput()}
+                                      className="px-2 py-0.5 bg-[#a3e635] text-black font-bold text-[8.5px] rounded hover:bg-[#bef264] cursor-pointer"
+                                    >
+                                      Aplicar
+                                    </button>
+                                  </div>
+
+                                  <div className="flex items-center justify-between pt-0.5">
+                                    <span className="text-[7.5px] text-gray-400">Pasos rápidos:</span>
+                                    <div className="flex items-center gap-1">
+                                      {[-50, +50, +100].map(step => (
+                                        <button
+                                          key={step}
+                                          type="button"
+                                          onClick={() => handleQuickFredoStep(step)}
+                                          className={`px-1.5 py-0.2 rounded text-[7.5px] font-bold cursor-pointer ${
+                                            step > 0 ? 'bg-emerald-950 text-emerald-300 hover:bg-emerald-900 border border-emerald-700/50' : 'bg-red-950 text-red-300 hover:bg-red-900 border border-red-700/50'
+                                          }`}
+                                        >
+                                          {step > 0 ? `+${step}` : step}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
 
                               {/* Rotación Rápida 90° */}
                               <div className="flex items-center justify-between pt-1 border-t border-[#252525]">
@@ -4554,6 +4870,28 @@ export default function App() {
                 return next;
               }));
             }}
+          />
+        );
+      })()}
+
+      {/* MOVABLE FLOATING SMART STRETCH TOOLBAR (Barra única de estirado inteligente movible en pantalla) */}
+      {selectedPieceIds.length > 0 && transformMode === 'stretch' && (() => {
+        const selPieces = pieces.filter(p => selectedPieceIds.includes(p.id) && !p.hidden);
+        if (selPieces.length === 0) return null;
+        const currentBounds = computePiecesBoundingBoxMm(selPieces);
+        const axisIdx = fredoAxis === 'X' ? 0 : fredoAxis === 'Y' ? 1 : 2;
+        const currentDim = currentBounds.size.getComponent(axisIdx) + (fredoPreviewDelta || 0);
+
+        return (
+          <SmartStretchToolbar
+            axis={fredoAxis}
+            onChangeAxis={setFredoAxis}
+            mode={fredoMode}
+            onChangeMode={setFredoMode}
+            currentDimMm={currentDim}
+            onApplyDimension={(dim, isAbsolute) => handleApplyFredoNumericStretch(dim, isAbsolute)}
+            onQuickStep={(step) => handleQuickFredoStep(step)}
+            onClose={() => setTransformMode('translate')}
           />
         );
       })()}

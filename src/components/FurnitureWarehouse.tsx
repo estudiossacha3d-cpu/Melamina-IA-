@@ -23,7 +23,7 @@ interface FurnitureWarehouseProps {
   onClose?: () => void;
 }
 
-const STORAGE_KEY = 'ia_mueble_almacen_dinamico_v1';
+const STORAGE_KEY = 'ia_mueble_almacen_v2';
 
 export default function FurnitureWarehouse({
   currentPieces,
@@ -68,20 +68,21 @@ export default function FurnitureWarehouse({
   // View Mode: 'grid' vs 'list'
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
 
-  // Load furniture items from localStorage or fallback to default catalog
+  // Load furniture items from localStorage (starts empty so user can upload their own 3D models)
   const [catalog, setCatalog] = useState<DynamicFurnitureItem[]>(() => {
     try {
+      localStorage.removeItem('ia_mueble_almacen_dinamico_v1');
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return parsed;
         }
       }
     } catch (e) {
       console.warn('Error loading furniture warehouse from storage:', e);
     }
-    return DEFAULT_FURNITURE_CATALOG;
+    return [];
   });
 
   // Custom categories
@@ -405,6 +406,17 @@ export default function FurnitureWarehouse({
     e.target.value = '';
   };
 
+  const handleClearWarehouse = () => {
+    if (catalog.length === 0) {
+      showToast('El almacén ya está vacío');
+      return;
+    }
+    if (window.confirm('¿Estás seguro de que deseas vaciar todos los muebles y modelos del almacén? Esta acción no se puede deshacer.')) {
+      saveCatalog([]);
+      showToast('Almacén vaciado con éxito');
+    }
+  };
+
   // Filter & Sort
   const filteredItems = useMemo(() => {
     const list = catalog.filter(item => {
@@ -512,6 +524,16 @@ export default function FurnitureWarehouse({
             >
               <Download className="w-3 h-3" />
             </button>
+            {catalog.length > 0 && (
+              <button
+                type="button"
+                onClick={handleClearWarehouse}
+                className="p-1 hover:bg-red-500/20 text-gray-400 hover:text-red-400 rounded cursor-pointer transition-colors flex items-center justify-center"
+                title="Vaciar todo el almacén"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            )}
           </div>
 
           {onClose && (
@@ -883,21 +905,42 @@ export default function FurnitureWarehouse({
           {/* Showcase Area: Fully Responsive Cards Grid or Technical List */}
           <div className="flex-1 p-2 sm:p-3 overflow-y-auto w-full max-w-full overflow-x-hidden">
             {filteredItems.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-6">
-                <div className="w-12 h-12 rounded-xl bg-[#1b1c26] border border-[#2b2e3d] flex items-center justify-center text-gray-500 mb-2">
-                  <Package className="w-6 h-6 opacity-40 text-[#f0a144]" />
+              <div className="h-full flex flex-col items-center justify-center text-center p-6 min-h-[300px]">
+                <div className="w-14 h-14 rounded-2xl bg-[#1b1c26] border border-[#2b2e3d] flex items-center justify-center text-gray-500 mb-3 shadow-lg">
+                  <Box className="w-7 h-7 text-[#f0a144]" />
                 </div>
-                <h3 className="text-xs font-bold text-gray-300 mb-1">No se encontraron muebles</h3>
-                <p className="text-[11px] text-gray-500 max-w-xs mb-3">
-                  No hay modelos para "{searchQuery}" en {selectedCategory}.
+                <h3 className="text-sm font-bold text-gray-200 mb-1">
+                  {catalog.length === 0 ? 'Almacén 3D Vacío' : 'No se encontraron muebles'}
+                </h3>
+                <p className="text-[11px] text-gray-400 max-w-sm mb-4">
+                  {catalog.length === 0
+                    ? 'El almacén está vacío y listo para que subas tus propios modelos 3D o guardes tus muebles personalizados.'
+                    : `No hay modelos para "${searchQuery}" en ${selectedCategory}.`}
                 </p>
-                <button
-                  type="button"
-                  onClick={() => handleOpenCreateModal(false)}
-                  className="px-3.5 py-1.5 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg text-xs cursor-pointer"
-                >
-                  + Crear Mueble
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <label className="px-3.5 py-1.5 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg text-xs cursor-pointer flex items-center gap-1.5 shadow-md transition-all active:scale-95">
+                    <Upload className="w-3.5 h-3.5 text-black" />
+                    <span>Subir Modelo / JSON</span>
+                    <input type="file" accept=".json" onChange={handleImportJSON} className="hidden" />
+                  </label>
+                  {currentPieces.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleOpenCreateModal(true)}
+                      className="px-3.5 py-1.5 bg-[#252836] hover:bg-[#32364a] text-white font-bold rounded-lg text-xs cursor-pointer border border-[#3b3f54] flex items-center gap-1.5 transition-all active:scale-95"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-[#f0a144]" />
+                      <span>Guardar Piezas 3D Actuales ({currentPieces.length})</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleOpenCreateModal(false)}
+                    className="px-3.5 py-1.5 bg-[#1b1d28] hover:bg-[#252836] text-gray-300 hover:text-white font-medium rounded-lg text-xs cursor-pointer border border-[#2e3244] flex items-center gap-1.5"
+                  >
+                    <span>+ Crear Manual</span>
+                  </button>
+                </div>
               </div>
             ) : viewMode === 'grid' ? (
               /* RESPONSIVE CARDS (Clean vertical orientation so width fits 100% of any phone) */

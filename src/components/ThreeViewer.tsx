@@ -6,6 +6,8 @@ import { Piece, EdgeThicknessConfig, PieceFaceKey, FaceTextureOptions, Group3D }
 import { getOrCreateThreeTexture, getPelikanoTextureUrl } from '../lib/textureManager';
 import CanvasErrorBoundary from './CanvasErrorBoundary';
 import FaceTextureGizmo from './FaceTextureGizmo';
+import { FredoScaleGizmo } from './FredoScaleGizmo';
+import { FredoStretchAxis, FredoStretchMode, calculateFredoStretch } from '../lib/fredoStretch';
 
 import { 
   MATERIAL_MAP, 
@@ -31,7 +33,16 @@ interface ThreeViewerProps {
   onDoubleClickPiece?: (id: string) => void;
   onEditDimensionAxis?: (pieceId: string, axis: 'largo' | 'ancho' | 'espesor') => void;
   hide3DLabels?: boolean;
-  transformMode?: 'translate' | 'rotate' | 'scale' | 'texture';
+  transformMode?: 'translate' | 'rotate' | 'scale' | 'texture' | 'stretch';
+  fredoAxis?: FredoStretchAxis;
+  onChangeFredoAxis?: (axis: FredoStretchAxis) => void;
+  fredoMode?: FredoStretchMode;
+  onChangeFredoMode?: (mode: FredoStretchMode) => void;
+  fredoPlaneRatio?: number;
+  onChangeFredoPlaneRatio?: (ratio: number) => void;
+  fredoPreviewDelta?: number;
+  onChangeFredoPreviewDelta?: (delta: number) => void;
+  onCommitFredoStretch?: (pieces: Piece[]) => void;
   dimensionSide?: 'pos' | 'neg';
   anchorMode?: 'single' | 'center';
   snapActive?: boolean;
@@ -41,6 +52,7 @@ interface ThreeViewerProps {
   onSelectTextureFace?: (face: PieceFaceKey | 'all') => void;
   isTextureModalOpen?: boolean;
   onCanvasPointerDown?: () => void;
+  editingGroupId?: string | null;
 }
 
 
@@ -404,7 +416,7 @@ const MelaminePiece = ({
   onDoubleClickPiece?: (id: string) => void;
   onEditDimensionAxis?: (pieceId: string, axis: 'largo' | 'ancho' | 'espesor') => void;
   hide3DLabels?: boolean;
-  transformMode?: 'translate' | 'rotate' | 'scale' | 'texture';
+  transformMode?: 'translate' | 'rotate' | 'scale' | 'texture' | 'stretch';
   dimensionSide?: 'pos' | 'neg';
   anchorMode?: 'single' | 'center';
   snapActive?: boolean;
@@ -2562,6 +2574,15 @@ export default function ThreeViewer({
   onEditDimensionAxis,
   hide3DLabels = false,
   transformMode,
+  fredoAxis,
+  onChangeFredoAxis,
+  fredoMode,
+  onChangeFredoMode,
+  fredoPlaneRatio,
+  onChangeFredoPlaneRatio,
+  fredoPreviewDelta,
+  onChangeFredoPreviewDelta,
+  onCommitFredoStretch,
   dimensionSide = 'pos',
   anchorMode = 'single',
   snapActive,
@@ -2571,7 +2592,8 @@ export default function ThreeViewer({
   onSelectTextureFace,
   isTextureModalOpen,
   onLongPressPiece,
-  onCanvasPointerDown
+  onCanvasPointerDown,
+  editingGroupId
 }: ThreeViewerProps) {
   const pieceGroupsRef = useRef<Map<string, THREE.Group>>(new Map());
 
@@ -2587,7 +2609,28 @@ export default function ThreeViewer({
     return pieces.filter(p => selectedPieceIds.includes(p.id) && !p.hidden);
   }, [pieces, selectedPieceIds]);
 
-  const isGroupTransformActive = selectedPieces.length > 1 || (selectedPieces.length === 1 && !!selectedPieces[0].groupId);
+  // Real-time live stretch preview without deforming thickness
+  const displayPieces = useMemo(() => {
+    if (transformMode === 'stretch' && fredoPreviewDelta && fredoPreviewDelta !== 0 && selectedPieces.length > 0) {
+      try {
+        const previewResult = calculateFredoStretch({
+          pieces: selectedPieces,
+          axis: fredoAxis || 'X',
+          planeRatio: fredoPlaneRatio ?? 0.5,
+          mode: fredoMode || 'anchor-neg',
+          deltaMm: fredoPreviewDelta
+        });
+        const map = new Map(previewResult.updatedPieces.map(p => [p.id, p]));
+        return pieces.map(p => map.get(p.id) || p);
+      } catch (err) {
+        console.error('Error calculating FredoStretch preview', err);
+        return pieces;
+      }
+    }
+    return pieces;
+  }, [pieces, transformMode, fredoPreviewDelta, selectedPieces, fredoAxis, fredoPlaneRatio, fredoMode]);
+
+  const isGroupTransformActive = !editingGroupId && (selectedPieces.length > 1 || (selectedPieces.length === 1 && !!selectedPieces[0].groupId));
 
   return (
     <div 
@@ -2641,7 +2684,23 @@ export default function ThreeViewer({
           <axesHelper args={[2]} />
           <GroundSnapVisualizer />
 
-          {isGroupTransformActive && (
+          {/* FredoScale Box Stretch Gizmo (Non-deforming group stretch with cutting plane grid) */}
+          {transformMode === 'stretch' && selectedPieces.length > 0 && (
+            <FredoScaleGizmo
+              selectedPieces={selectedPieces}
+              axis={fredoAxis || 'X'}
+              onChangeAxis={onChangeFredoAxis || (() => {})}
+              mode={fredoMode || 'anchor-neg'}
+              onChangeMode={onChangeFredoMode || (() => {})}
+              planeRatio={fredoPlaneRatio ?? 0.5}
+              onChangePlaneRatio={onChangeFredoPlaneRatio || (() => {})}
+              previewDelta={fredoPreviewDelta || 0}
+              onPreviewDeltaChange={onChangeFredoPreviewDelta || (() => {})}
+              onCommitStretch={onCommitFredoStretch || (() => {})}
+            />
+          )}
+
+          {isGroupTransformActive && transformMode !== 'stretch' && (
             <GroupTransformControls
               selectedPieces={selectedPieces}
               allPieces={pieces}
@@ -2654,7 +2713,7 @@ export default function ThreeViewer({
             />
           )}
    
-          {pieces.map((piece) => {
+          {displayPieces.map((piece) => {
             if (piece.hidden) return null;
             return piece.cantidad > 0 && Array.from({ length: piece.cantidad }).map((_, idx) => (
               <MelaminePiece
@@ -2668,9 +2727,9 @@ export default function ThreeViewer({
                     piece.position3D[2]
                   ]
                 }}
-                allPieces={pieces}
+                allPieces={displayPieces}
                 isSelected={selectedPieceIds.includes(piece.id)}
-                showControls={!isGroupTransformActive && selectedPieceIds[0] === piece.id && idx === 0}
+                showControls={!isGroupTransformActive && transformMode !== 'stretch' && selectedPieceIds[0] === piece.id && idx === 0}
                 registerPieceGroup={idx === 0 ? registerPieceGroup : undefined}
                 onClick={(e) => onSelectPiece(piece.id, e.shiftKey || e.ctrlKey || e.metaKey)}
                 onTransformEnd={(pos, rot, scale) => {

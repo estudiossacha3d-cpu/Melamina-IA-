@@ -381,7 +381,7 @@ export default function CutPlanViewer({
   onSwitchTo3D
 }: CutPlanViewerProps) {
   const [showSettings, setShowSettings] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(0.35);
   const [wheelMode, setWheelMode] = useState<'scroll' | 'zoom'>('scroll');
   const [showZoomHint, setShowZoomHint] = useState<boolean>(false);
   const zoomHintTimeoutRef = useRef<any>(null);
@@ -508,7 +508,7 @@ export default function CutPlanViewer({
       if (isZoomTrigger) {
         e.preventDefault();
         const zoomFactor = e.deltaY < 0 ? 1.12 : 0.89;
-        setZoom(prev => Math.max(0.25, Math.min(4.0, Number((prev * zoomFactor).toFixed(2)))));
+        setZoom(prev => Math.max(0.15, Math.min(4.0, Number((prev * zoomFactor).toFixed(2)))));
       } else {
         // Normal scroll: do NOT call e.preventDefault(), allow native container scrolling!
         setShowZoomHint(true);
@@ -554,7 +554,7 @@ export default function CutPlanViewer({
         const t1 = e.touches[1];
         const currentDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
         const factor = currentDist / initialPinchDist;
-        const newZoom = Math.max(0.25, Math.min(4.0, Number((initialPinchZoom * factor).toFixed(2))));
+        const newZoom = Math.max(0.15, Math.min(4.0, Number((initialPinchZoom * factor).toFixed(2))));
         setZoom(newZoom);
       }
     };
@@ -812,9 +812,9 @@ export default function CutPlanViewer({
       const targetScale = Math.min(cw / sheetConfig.width, ch / sheetConfig.height);
       if (targetScale > 0 && viewScale > 0) {
         const optimalZoom = targetScale / viewScale;
-        setZoom(Math.max(0.4, Math.min(3.0, Number(optimalZoom.toFixed(2)))));
+        setZoom(Math.max(0.15, Math.min(3.0, Number(optimalZoom.toFixed(2)))));
       } else {
-        setZoom(1);
+        setZoom(0.35);
       }
       setPan({ x: 0, y: 0 });
     }
@@ -1455,7 +1455,7 @@ export default function CutPlanViewer({
             <div className="flex items-center gap-1 bg-[#222222] border border-[#333333] p-0.5 rounded-lg shrink-0 select-none">
               <button 
                 type="button"
-                onClick={() => setZoom(z => Math.max(z - 0.15, 0.25))} 
+                onClick={() => setZoom(z => Math.max(0.15, Number((z - 0.10).toFixed(2))))} 
                 className="p-1 rounded text-[#aaa] hover:text-white hover:bg-[#333333] transition-colors" 
                 title="Reducir Zoom (Lupa -)"
               >
@@ -1463,15 +1463,15 @@ export default function CutPlanViewer({
               </button>
               <button 
                 type="button"
-                onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} 
+                onClick={() => { setZoom(0.35); setPan({ x: 0, y: 0 }); }} 
                 className="px-1.5 py-0.5 rounded text-white font-mono text-[10px] font-bold hover:bg-[#333333] transition-colors" 
-                title="Restablecer Zoom (100%)"
+                title="Restablecer Zoom por defecto (35%)"
               >
                 {Math.round(zoom * 100)}%
               </button>
               <button 
                 type="button"
-                onClick={() => setZoom(z => Math.min(z + 0.15, 4.0))} 
+                onClick={() => setZoom(z => Math.min(4.0, Number((z + 0.10).toFixed(2))))} 
                 className="p-1 rounded text-[#aaa] hover:text-white hover:bg-[#333333] transition-colors" 
                 title="Aumentar Zoom (Lupa +)"
               >
@@ -1710,19 +1710,19 @@ export default function CutPlanViewer({
               {/* Alejar / Lupa - */}
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, Number((z - 0.15).toFixed(2)))); }}
+                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.15, Number((z - 0.10).toFixed(2)))); }}
                 className="p-1.5 hover:bg-[#2d2d2d] active:bg-[#383838] rounded-lg text-[#aaa] hover:text-white transition-colors"
                 title="Alejar plano (Lupa -)"
               >
                 <ZoomOut className="w-4 h-4" />
               </button>
 
-              {/* Porcentaje actual y restablecer al 100% */}
+              {/* Porcentaje actual y restablecer al 35% */}
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); setZoom(1); setPan({ x: 0, y: 0 }); }}
+                onClick={(e) => { e.stopPropagation(); setZoom(0.35); setPan({ x: 0, y: 0 }); }}
                 className="px-2 py-1 hover:bg-[#2d2d2d] rounded-lg text-white font-mono text-[11px] font-bold transition-colors"
-                title="Restablecer Zoom al 100% y centrar plano"
+                title="Restablecer Zoom por defecto (35%) y centrar plano"
               >
                 {Math.round(zoom * 100)}%
               </button>
@@ -1730,7 +1730,7 @@ export default function CutPlanViewer({
               {/* Acercar / Lupa + */}
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(4.0, Number((z + 0.15).toFixed(2)))); }}
+                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(4.0, Number((z + 0.10).toFixed(2)))); }}
                 className="p-1.5 hover:bg-[#2d2d2d] active:bg-[#383838] rounded-lg text-[#aaa] hover:text-white transition-colors"
                 title="Acercar plano (Lupa +)"
               >
