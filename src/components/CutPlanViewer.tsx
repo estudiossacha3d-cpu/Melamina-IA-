@@ -8,6 +8,7 @@ import { StockSheetsTable } from './StockSheetsTable';
 import { PdfExportModal } from './PdfExportModal';
 import { MaterialSummaryModal } from './MaterialSummaryModal';
 import { useDraggableWindow } from '../hooks/useDraggableWindow';
+import { packRectangles } from '../lib/cutOptimizer';
 import { 
   Settings, BarChart3, Scissors, Layers, RotateCw, ZoomIn, ZoomOut, 
   Maximize2, Minimize2, LayoutList, Table, Rows, Grid, Search, ChevronUp, ChevronDown, 
@@ -126,7 +127,7 @@ export interface BoardGroup {
   edgeThick: number;
 }
 
-// Professional Packing Algorithm: Guillotine with First-Fit Decreasing
+// Shared professional packing engine used by the diagram and material reports.
 function professionalPack(
   pieces: Piece[], 
   config: SheetConfig,
@@ -135,53 +136,20 @@ function professionalPack(
   boards: PackedBoard[];
   stats: { efficiency: number; areaUsed: number; totalArea: number; boardsCount: number };
 } {
-  const { width, height, kerf, margin } = config;
-  const usableW = width - (margin * 2);
-  const usableH = height - (margin * 2);
-
-  // Flatten pieces based on quantity, applying edge thickness deductions for corte
-  const flatPieces: { 
-    w: number; 
-    h: number; 
-    id: string; 
-    name: string; 
-    veta: boolean; 
-    rotacion: boolean;
-    cantos: EdgeConfig; 
-    material?: string; 
-    espesor?: number;
-    finalW: number;
-    finalH: number;
-    descuentoLargo: number;
-    descuentoAncho: number;
-    customColor?: string;
-    color?: string;
-    textColor?: string;
-    isDark?: boolean;
-    substrate?: SubstrateType;
-    substrateLabel?: string;
-    materialName?: string;
-    isWood?: boolean;
-    isGlass?: boolean;
-    isMirror?: boolean;
-    hasGrain?: boolean;
-    textureUrl?: string | null;
-  }[] = [];
-
-  pieces.forEach(p => {
+  const items = pieces.flatMap(p => {
     const cutDim = calculatePieceCutDimensions(p, edgeThicknessConfig);
     const profile = getPieceMaterialProfile(p);
-    // Rotación permitida: solo si NO tiene veta física y rotación está autorizada (desactivada por defecto)
     const canRotate = !p.veta && p.rotacion === true;
-    for (let i = 0; i < p.cantidad; i++) {
-      flatPieces.push({ 
-        w: cutDim.largoCorte, 
-        h: cutDim.anchoCorte, 
-        id: p.id, 
-        name: p.name,
+    const quantity = Math.max(0, Math.floor(p.cantidad || 0));
+    return Array.from({ length: quantity }, () => ({
+      w: cutDim.largoCorte,
+      h: cutDim.anchoCorte,
+      id: p.id,
+      name: p.name,
+      canRotate,
+      meta: {
         veta: !!p.veta,
-        rotacion: canRotate,
-        cantos: p.cantos || { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' },
+        cantos: p.cantos || { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' } as EdgeConfig,
         material: p.material || 'MELAMINA',
         espesor: p.espesor || 18,
         finalW: p.largo,
@@ -199,172 +167,48 @@ function professionalPack(
         isGlass: profile.isGlass,
         isMirror: profile.isMirror,
         hasGrain: profile.hasGrain,
-        textureUrl: profile.textureUrl
-      });
-    }
+        textureUrl: profile.textureUrl,
+      },
+    }));
   });
+  const packed = packRectangles(items, config);
+  const boards: PackedBoard[] = packed.boards.map(board => ({
+    boardIndex: board.boardIndex,
+    wasteRects: board.wasteRects,
+    stats: board.stats,
+    rects: board.rects.map(rect => ({
+      x: rect.x,
+      y: rect.y,
+      w: rect.w,
+      h: rect.h,
+      id: rect.id,
+      name: rect.name,
+      rotated: rect.rotated,
+      cutIndex: rect.cutIndex,
+      cantos: rect.meta.cantos,
+      material: rect.meta.material,
+      espesor: rect.meta.espesor,
+      finalW: rect.rotated ? rect.meta.finalH : rect.meta.finalW,
+      finalH: rect.rotated ? rect.meta.finalW : rect.meta.finalH,
+      descuentoLargo: rect.meta.descuentoLargo,
+      descuentoAncho: rect.meta.descuentoAncho,
+      customColor: rect.meta.customColor,
+      color: rect.meta.color,
+      textColor: rect.meta.textColor,
+      isDark: rect.meta.isDark,
+      substrate: rect.meta.substrate,
+      substrateLabel: rect.meta.substrateLabel,
+      materialName: rect.meta.materialName,
+      isWood: rect.meta.isWood,
+      isGlass: rect.meta.isGlass,
+      isMirror: rect.meta.isMirror,
+      hasGrain: rect.meta.hasGrain,
+      veta: rect.meta.veta,
+      textureUrl: rect.meta.textureUrl,
+    })),
+  }));
 
-  // Sort by area decreasing
-  flatPieces.sort((a, b) => (b.w * b.h) - (a.w * a.h));
-
-  const boards: PackedBoard[] = [];
-  let areaUsed = 0;
-
-  const currentPieces = [...flatPieces];
-
-  while (currentPieces.length > 0) {
-    const boardRects: Rect[] = [];
-    const spaces: { x: number; y: number; w: number; h: number }[] = [
-      { x: margin, y: margin, w: usableW, h: usableH }
-    ];
-
-    for (let i = 0; i < currentPieces.length; i++) {
-      const item = currentPieces[i];
-      let bestSpaceIdx = -1;
-      let bestRotated = false;
-      let bestShortSide = Infinity;
-      let bestLongSide = Infinity;
-
-      // Best Short Side Fit (BSSF) guillotine search:
-      // Evaluates both normal and rotated fit if item.rotacion is true.
-      // If item.rotacion is false, strictly locks normal orientation.
-      for (let j = 0; j < spaces.length; j++) {
-        const s = spaces[j];
-
-        // Normal fit (orientation as listed in table)
-        if (item.w <= s.w && item.h <= s.h) {
-          const leftoverShort = Math.min(s.w - item.w, s.h - item.h);
-          const leftoverLong = Math.max(s.w - item.w, s.h - item.h);
-          if (leftoverShort < bestShortSide || (leftoverShort === bestShortSide && leftoverLong < bestLongSide)) {
-            bestShortSide = leftoverShort;
-            bestLongSide = leftoverLong;
-            bestSpaceIdx = j;
-            bestRotated = false;
-          }
-        }
-
-        // Rotated fit (90° rotation - ONLY permitted if item.rotacion is true)
-        if (item.rotacion && item.h <= s.w && item.w <= s.h) {
-          const leftoverShort = Math.min(s.w - item.h, s.h - item.w);
-          const leftoverLong = Math.max(s.w - item.h, s.h - item.w);
-          if (leftoverShort < bestShortSide || (leftoverShort === bestShortSide && leftoverLong < bestLongSide)) {
-            bestShortSide = leftoverShort;
-            bestLongSide = leftoverLong;
-            bestSpaceIdx = j;
-            bestRotated = true;
-          }
-        }
-      }
-
-      const spaceIdx = bestSpaceIdx;
-      const rotated = bestRotated;
-
-      if (spaceIdx !== -1) {
-        const space = spaces[spaceIdx];
-        const pw = rotated ? item.h : item.w;
-        const ph = rotated ? item.w : item.h;
-
-        boardRects.push({
-          x: space.x,
-          y: space.y,
-          w: pw,
-          h: ph,
-          id: item.id,
-          name: item.name,
-          rotated,
-          cutIndex: boardRects.length + 1,
-          cantos: item.cantos,
-          material: item.material,
-          espesor: item.espesor,
-          finalW: rotated ? item.finalH : item.finalW,
-          finalH: rotated ? item.finalW : item.finalH,
-          descuentoLargo: item.descuentoLargo,
-          descuentoAncho: item.descuentoAncho,
-          customColor: item.customColor,
-          color: item.color,
-          textColor: item.textColor,
-          isDark: item.isDark,
-          substrate: item.substrate,
-          substrateLabel: item.substrateLabel,
-          materialName: item.materialName,
-          isWood: item.isWood,
-          isGlass: item.isGlass,
-          isMirror: item.isMirror,
-          hasGrain: item.hasGrain,
-          veta: item.veta,
-          textureUrl: item.textureUrl
-        });
-
-        areaUsed += pw * ph;
-
-        // Split space (Guillotine cut)
-        const remainingW = space.w - pw - kerf;
-        const remainingH = space.h - ph - kerf;
-
-        spaces.splice(spaceIdx, 1);
-
-        if (remainingW > 0 && ph > 0) {
-          spaces.push({ x: space.x + pw + kerf, y: space.y, w: remainingW, h: ph });
-        }
-        if (remainingH > 0 && space.w > 0) {
-          spaces.push({ x: space.x, y: space.y + ph + kerf, w: space.w, h: remainingH });
-        }
-
-        spaces.sort((a, b) => (a.y === b.y) ? a.x - b.x : a.y - b.y);
-
-        currentPieces.splice(i, 1);
-        i--;
-      }
-    }
-
-    if (boardRects.length === 0 && currentPieces.length > 0) {
-      currentPieces.shift();
-      continue;
-    }
-
-    // Collect remaining unallocated spaces as waste (desechos)
-    const wasteRects: WasteRect[] = [];
-    if (margin > 0) {
-      wasteRects.push({ x: 0, y: 0, w: width, h: margin, isMargin: true });
-      wasteRects.push({ x: 0, y: height - margin, w: width, h: margin, isMargin: true });
-      wasteRects.push({ x: 0, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
-      wasteRects.push({ x: width - margin, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
-    }
-
-    spaces.forEach(s => {
-      if (s.w > 2 && s.h > 2) {
-        wasteRects.push({ x: s.x, y: s.y, w: s.w, h: s.h, isMargin: false });
-      }
-    });
-
-    const boardAreaUsed = boardRects.reduce((acc, r) => acc + (r.w * r.h), 0);
-    const boardTotalArea = width * height;
-    const boardEfficiency = boardTotalArea > 0 ? (boardAreaUsed / boardTotalArea) * 100 : 0;
-
-    boards.push({
-      boardIndex: boards.length + 1,
-      rects: boardRects,
-      wasteRects,
-      stats: {
-        efficiency: boardEfficiency,
-        areaUsed: boardAreaUsed,
-        totalArea: boardTotalArea
-      }
-    });
-  }
-
-  const totalArea = boards.length * width * height;
-  const efficiency = totalArea > 0 ? (areaUsed / totalArea) * 100 : 0;
-
-  return { 
-    boards, 
-    stats: { 
-      efficiency, 
-      areaUsed, 
-      totalArea, 
-      boardsCount: boards.length 
-    } 
-  };
+  return { boards, stats: packed.stats };
 }
 
 export default function CutPlanViewer({ 
@@ -2775,4 +2619,3 @@ export default function CutPlanViewer({
     </div>
   );
 }
-

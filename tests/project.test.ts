@@ -4,6 +4,13 @@ import { createStarterProject, serializePiecesCsv, sheetGroupKey } from '../src/
 import { professionalPack } from '../src/lib/cutOptimizer';
 import { MODULE_CATEGORIES } from '../src/lib/moduleLibrary';
 import { buildMaterialReport } from '../src/lib/materialReport';
+import { DEFAULT_FURNITURE_CATEGORIES } from '../src/data/defaultFurniture';
+import { calculateFredoStretch, computePiecesBoundingBoxMm } from '../src/lib/fredoStretch';
+import {
+  LEGACY_WAREHOUSE_STORAGE_KEY,
+  WAREHOUSE_STORAGE_KEY,
+  loadWarehouseCatalog,
+} from '../src/lib/warehouseStorage';
 
 test('starter project is an assembled six-board module', () => {
   const project = createStarterProject();
@@ -52,14 +59,18 @@ test('CSV contains production dimensions and semicolon-separated columns', () =>
 
 test('grain direction prevents rotation and reports pieces that do not fit', () => {
   const [base] = createStarterProject().pieces;
-  const grainPiece = { ...base, largo: 800, ancho: 500, cantidad: 1, veta: true };
+  const grainPiece = { ...base, largo: 800, ancho: 500, cantidad: 1, veta: true, rotacion: true };
   const config = { width: 600, height: 1000, kerf: 3, margin: 0 };
 
   const locked = professionalPack([grainPiece], config);
   assert.equal(locked.boards.length, 0);
   assert.equal(locked.unplaced.length, 1);
 
-  const rotatable = professionalPack([{ ...grainPiece, veta: false }], config);
+  const lockedBySetting = professionalPack([{ ...grainPiece, veta: false, rotacion: false }], config);
+  assert.equal(lockedBySetting.boards.length, 0);
+  assert.equal(lockedBySetting.unplaced.length, 1);
+
+  const rotatable = professionalPack([{ ...grainPiece, veta: false, rotacion: true }], config);
   assert.equal(rotatable.unplaced.length, 0);
   assert.equal(rotatable.boards[0].rects[0].rotated, true);
 });
@@ -110,4 +121,77 @@ test('module library exposes the initial empty furniture categories', () => {
     'Cocina baja',
   ]);
   assert.equal(new Set(MODULE_CATEGORIES.map(category => category.id)).size, MODULE_CATEGORIES.length);
+  assert.deepEqual(DEFAULT_FURNITURE_CATEGORIES, [
+    'Todas',
+    'Estantes',
+    'Escritorios',
+    'Roperos',
+    'Cómodas',
+    'Cocina alta',
+    'Cocina baja',
+  ]);
+});
+
+test('Fredo stretch preserves board thickness and applies the requested group width', () => {
+  const pieces = createStarterProject().pieces.filter(piece => piece.espesor === 18);
+  const initial = computePiecesBoundingBoxMm(pieces);
+  const thicknessById = new Map(pieces.map(piece => [piece.id, piece.espesor]));
+
+  const result = calculateFredoStretch({
+    pieces,
+    axis: 'X',
+    planeRatio: 0.5,
+    mode: 'anchor-neg',
+    deltaMm: 200,
+    initialBounds: initial,
+  });
+
+  assert.ok(Math.abs(result.newBounds.min.x - initial.min.x) < 0.001);
+  assert.ok(Math.abs(result.newBounds.size.x - (initial.size.x + 200)) < 0.001);
+  assert.ok(result.updatedPieces.every(piece => piece.espesor === thicknessById.get(piece.id)));
+  assert.equal(result.deltaApplied, 200);
+});
+
+test('Fredo stretch clamps reductions before the group becomes invalid', () => {
+  const pieces = createStarterProject().pieces.filter(piece => piece.espesor === 18);
+  const initial = computePiecesBoundingBoxMm(pieces);
+  const result = calculateFredoStretch({
+    pieces,
+    axis: 'X',
+    planeRatio: 0.5,
+    mode: 'center',
+    deltaMm: -5000,
+    initialBounds: initial,
+  });
+
+  assert.equal(result.deltaApplied, 10 - initial.size.x);
+  assert.ok(result.newBounds.size.x >= 10);
+  assert.ok(result.updatedPieces.every(piece => piece.espesor > 0));
+});
+
+test('warehouse migrates the legacy catalog without deleting the backup', () => {
+  const legacyCatalog = [{
+    id: 'legacy-1',
+    name: 'Estante de prueba',
+    category: 'Estantes',
+    description: 'Catálogo anterior',
+    dimensions: { width: 600, height: 1800, depth: 300 },
+    thickness: 18,
+    tags: ['estante'],
+    pieces: [],
+    status: 'ready_for_3d' as const,
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+  }];
+  const values = new Map<string, string>([
+    [LEGACY_WAREHOUSE_STORAGE_KEY, JSON.stringify(legacyCatalog)],
+  ]);
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  };
+
+  assert.deepEqual(loadWarehouseCatalog(storage), legacyCatalog);
+  assert.equal(values.get(LEGACY_WAREHOUSE_STORAGE_KEY), JSON.stringify(legacyCatalog));
+  assert.equal(values.get(WAREHOUSE_STORAGE_KEY), JSON.stringify(legacyCatalog));
 });
