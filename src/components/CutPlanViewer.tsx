@@ -1,12 +1,40 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
-import { Piece, SheetConfig, EdgeConfig } from '../types';
+import { Piece, SheetConfig, EdgeConfig, EdgeThicknessConfig } from '../types';
+import { calculatePieceCutDimensions, DEFAULT_EDGE_THICKNESS_CONFIG } from '../lib/edgeCalculations';
+import { getPieceMaterialProfile, SubstrateType } from '../lib/materialCalculations';
 import { v4 as uuidv4 } from 'uuid';
+import { CutPiecesTable } from './CutPiecesTable';
+import { StockSheetsTable } from './StockSheetsTable';
+import { PdfExportModal } from './PdfExportModal';
+import { MaterialSummaryModal } from './MaterialSummaryModal';
+import { useDraggableWindow } from '../hooks/useDraggableWindow';
 import { 
   Settings, BarChart3, Scissors, Layers, RotateCw, ZoomIn, ZoomOut, 
   Maximize2, Minimize2, LayoutList, Table, Rows, Grid, Search, ChevronUp, ChevronDown, 
-  Check, Layers3, Sun, Moon, FlipHorizontal, Printer, Download, Eye, EyeOff, Hash, GripHorizontal
+  Check, Layers3, Sun, Moon, FlipHorizontal, Printer, Download, Eye, EyeOff, Hash, GripHorizontal,
+  Box, Trash2, Move, Plus, Minus, PanelLeftClose, PanelLeftOpen, Warehouse, ClipboardList,
+  ChevronsRight, GripVertical, ChevronsLeft, X, FileText, Type, Sliders, RotateCcw, Sparkles
 } from 'lucide-react';
-import { buildMaterialReport } from '../lib/materialReport';
+
+export interface CadTextCalibration {
+  nameScale: number; // 0.5 to 2.2
+  dimScale: number; // 0.5 to 2.2
+  fontFamily: 'sans' | 'mono' | 'condensed';
+  fontWeight: 'normal' | 'bold' | 'extrabold' | 'black';
+  letterCase: 'uppercase' | 'original';
+  showBadgeBg: boolean;
+  dimStyle: 'default' | 'contrast' | 'amber' | 'blue' | 'red';
+}
+
+export const DEFAULT_CAD_TEXT_CALIBRATION: CadTextCalibration = {
+  nameScale: 1.0,
+  dimScale: 1.0,
+  fontFamily: 'sans',
+  fontWeight: 'extrabold',
+  letterCase: 'uppercase',
+  showBadgeBg: false,
+  dimStyle: 'default'
+};
 
 interface CutPlanViewerProps {
   pieces: Piece[];
@@ -17,6 +45,326 @@ interface CutPlanViewerProps {
   updatePiece: (id: string, updates: Partial<Piece>) => void;
   onConsolidatePieces?: () => void;
   setPieces?: React.Dispatch<React.SetStateAction<Piece[]>>;
+  edgeThicknessConfig?: EdgeThicknessConfig;
+  onUpdateEdgeThicknessConfig?: (config: EdgeThicknessConfig) => void;
+  onSwitchTo3D?: () => void;
+}
+
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  id: string;
+  name: string;
+  rotated: boolean;
+  cutIndex: number;
+  cantos: EdgeConfig;
+  material?: string;
+  espesor?: number;
+  finalW?: number;
+  finalH?: number;
+  descuentoLargo?: number;
+  descuentoAncho?: number;
+  // Material connection attributes
+  customColor?: string;
+  color?: string;
+  textColor?: string;
+  isDark?: boolean;
+  substrate?: SubstrateType;
+  substrateLabel?: string;
+  materialName?: string;
+  isWood?: boolean;
+  isGlass?: boolean;
+  isMirror?: boolean;
+  hasGrain?: boolean;
+  veta?: boolean;
+  textureUrl?: string | null;
+}
+
+export interface WasteRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  isMargin?: boolean;
+}
+
+export interface PackedBoard {
+  boardIndex: number;
+  rects: Rect[];
+  wasteRects: WasteRect[];
+  stats: {
+    efficiency: number;
+    areaUsed: number;
+    totalArea: number;
+  };
+}
+
+export interface BoardGroup {
+  groupKey: string;
+  substrate: SubstrateType;
+  substrateLabel: string;
+  materialName: string;
+  materialColor: string;
+  displayName: string;
+  code: string;
+  thickness: number;
+  isWood: boolean;
+  isGlass: boolean;
+  textureUrl?: string | null;
+  boards: PackedBoard[];
+  stats: {
+    efficiency: number;
+    areaUsed: number;
+    totalArea: number;
+    boardsCount: number;
+  };
+  config: SheetConfig;
+  piecesCount: number;
+  edgeThin: number;
+  edgeThick: number;
+}
+
+// Professional Packing Algorithm: Guillotine with First-Fit Decreasing
+function professionalPack(
+  pieces: Piece[], 
+  config: SheetConfig,
+  edgeThicknessConfig: EdgeThicknessConfig = DEFAULT_EDGE_THICKNESS_CONFIG
+): { 
+  boards: PackedBoard[];
+  stats: { efficiency: number; areaUsed: number; totalArea: number; boardsCount: number };
+} {
+  const { width, height, kerf, margin } = config;
+  const usableW = width - (margin * 2);
+  const usableH = height - (margin * 2);
+
+  // Flatten pieces based on quantity, applying edge thickness deductions for corte
+  const flatPieces: { 
+    w: number; 
+    h: number; 
+    id: string; 
+    name: string; 
+    veta: boolean; 
+    rotacion: boolean;
+    cantos: EdgeConfig; 
+    material?: string; 
+    espesor?: number;
+    finalW: number;
+    finalH: number;
+    descuentoLargo: number;
+    descuentoAncho: number;
+    customColor?: string;
+    color?: string;
+    textColor?: string;
+    isDark?: boolean;
+    substrate?: SubstrateType;
+    substrateLabel?: string;
+    materialName?: string;
+    isWood?: boolean;
+    isGlass?: boolean;
+    isMirror?: boolean;
+    hasGrain?: boolean;
+    textureUrl?: string | null;
+  }[] = [];
+
+  pieces.forEach(p => {
+    const cutDim = calculatePieceCutDimensions(p, edgeThicknessConfig);
+    const profile = getPieceMaterialProfile(p);
+    // Rotación permitida: solo si NO tiene veta física y rotación está autorizada (desactivada por defecto)
+    const canRotate = !p.veta && p.rotacion === true;
+    for (let i = 0; i < p.cantidad; i++) {
+      flatPieces.push({ 
+        w: cutDim.largoCorte, 
+        h: cutDim.anchoCorte, 
+        id: p.id, 
+        name: p.name,
+        veta: !!p.veta,
+        rotacion: canRotate,
+        cantos: p.cantos || { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' },
+        material: p.material || 'MELAMINA',
+        espesor: p.espesor || 18,
+        finalW: p.largo,
+        finalH: p.ancho,
+        descuentoLargo: cutDim.descuentoLargoTotal,
+        descuentoAncho: cutDim.descuentoAnchoTotal,
+        customColor: p.customColor,
+        color: profile.color,
+        textColor: profile.textColor,
+        isDark: profile.isDark,
+        substrate: profile.substrate,
+        substrateLabel: profile.substrateLabel,
+        materialName: profile.materialName,
+        isWood: profile.isWood,
+        isGlass: profile.isGlass,
+        isMirror: profile.isMirror,
+        hasGrain: profile.hasGrain,
+        textureUrl: profile.textureUrl
+      });
+    }
+  });
+
+  // Sort by area decreasing
+  flatPieces.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+
+  const boards: PackedBoard[] = [];
+  let areaUsed = 0;
+
+  const currentPieces = [...flatPieces];
+
+  while (currentPieces.length > 0) {
+    const boardRects: Rect[] = [];
+    const spaces: { x: number; y: number; w: number; h: number }[] = [
+      { x: margin, y: margin, w: usableW, h: usableH }
+    ];
+
+    for (let i = 0; i < currentPieces.length; i++) {
+      const item = currentPieces[i];
+      let bestSpaceIdx = -1;
+      let bestRotated = false;
+      let bestShortSide = Infinity;
+      let bestLongSide = Infinity;
+
+      // Best Short Side Fit (BSSF) guillotine search:
+      // Evaluates both normal and rotated fit if item.rotacion is true.
+      // If item.rotacion is false, strictly locks normal orientation.
+      for (let j = 0; j < spaces.length; j++) {
+        const s = spaces[j];
+
+        // Normal fit (orientation as listed in table)
+        if (item.w <= s.w && item.h <= s.h) {
+          const leftoverShort = Math.min(s.w - item.w, s.h - item.h);
+          const leftoverLong = Math.max(s.w - item.w, s.h - item.h);
+          if (leftoverShort < bestShortSide || (leftoverShort === bestShortSide && leftoverLong < bestLongSide)) {
+            bestShortSide = leftoverShort;
+            bestLongSide = leftoverLong;
+            bestSpaceIdx = j;
+            bestRotated = false;
+          }
+        }
+
+        // Rotated fit (90° rotation - ONLY permitted if item.rotacion is true)
+        if (item.rotacion && item.h <= s.w && item.w <= s.h) {
+          const leftoverShort = Math.min(s.w - item.h, s.h - item.w);
+          const leftoverLong = Math.max(s.w - item.h, s.h - item.w);
+          if (leftoverShort < bestShortSide || (leftoverShort === bestShortSide && leftoverLong < bestLongSide)) {
+            bestShortSide = leftoverShort;
+            bestLongSide = leftoverLong;
+            bestSpaceIdx = j;
+            bestRotated = true;
+          }
+        }
+      }
+
+      const spaceIdx = bestSpaceIdx;
+      const rotated = bestRotated;
+
+      if (spaceIdx !== -1) {
+        const space = spaces[spaceIdx];
+        const pw = rotated ? item.h : item.w;
+        const ph = rotated ? item.w : item.h;
+
+        boardRects.push({
+          x: space.x,
+          y: space.y,
+          w: pw,
+          h: ph,
+          id: item.id,
+          name: item.name,
+          rotated,
+          cutIndex: boardRects.length + 1,
+          cantos: item.cantos,
+          material: item.material,
+          espesor: item.espesor,
+          finalW: rotated ? item.finalH : item.finalW,
+          finalH: rotated ? item.finalW : item.finalH,
+          descuentoLargo: item.descuentoLargo,
+          descuentoAncho: item.descuentoAncho,
+          customColor: item.customColor,
+          color: item.color,
+          textColor: item.textColor,
+          isDark: item.isDark,
+          substrate: item.substrate,
+          substrateLabel: item.substrateLabel,
+          materialName: item.materialName,
+          isWood: item.isWood,
+          isGlass: item.isGlass,
+          isMirror: item.isMirror,
+          hasGrain: item.hasGrain,
+          veta: item.veta,
+          textureUrl: item.textureUrl
+        });
+
+        areaUsed += pw * ph;
+
+        // Split space (Guillotine cut)
+        const remainingW = space.w - pw - kerf;
+        const remainingH = space.h - ph - kerf;
+
+        spaces.splice(spaceIdx, 1);
+
+        if (remainingW > 0 && ph > 0) {
+          spaces.push({ x: space.x + pw + kerf, y: space.y, w: remainingW, h: ph });
+        }
+        if (remainingH > 0 && space.w > 0) {
+          spaces.push({ x: space.x, y: space.y + ph + kerf, w: space.w, h: remainingH });
+        }
+
+        spaces.sort((a, b) => (a.y === b.y) ? a.x - b.x : a.y - b.y);
+
+        currentPieces.splice(i, 1);
+        i--;
+      }
+    }
+
+    if (boardRects.length === 0 && currentPieces.length > 0) {
+      currentPieces.shift();
+      continue;
+    }
+
+    // Collect remaining unallocated spaces as waste (desechos)
+    const wasteRects: WasteRect[] = [];
+    if (margin > 0) {
+      wasteRects.push({ x: 0, y: 0, w: width, h: margin, isMargin: true });
+      wasteRects.push({ x: 0, y: height - margin, w: width, h: margin, isMargin: true });
+      wasteRects.push({ x: 0, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
+      wasteRects.push({ x: width - margin, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
+    }
+
+    spaces.forEach(s => {
+      if (s.w > 2 && s.h > 2) {
+        wasteRects.push({ x: s.x, y: s.y, w: s.w, h: s.h, isMargin: false });
+      }
+    });
+
+    const boardAreaUsed = boardRects.reduce((acc, r) => acc + (r.w * r.h), 0);
+    const boardTotalArea = width * height;
+    const boardEfficiency = boardTotalArea > 0 ? (boardAreaUsed / boardTotalArea) * 100 : 0;
+
+    boards.push({
+      boardIndex: boards.length + 1,
+      rects: boardRects,
+      wasteRects,
+      stats: {
+        efficiency: boardEfficiency,
+        areaUsed: boardAreaUsed,
+        totalArea: boardTotalArea
+      }
+    });
+  }
+
+  const totalArea = boards.length * width * height;
+  const efficiency = totalArea > 0 ? (areaUsed / totalArea) * 100 : 0;
+
+  return { 
+    boards, 
+    stats: { 
+      efficiency, 
+      areaUsed, 
+      totalArea, 
+      boardsCount: boards.length 
+    } 
+  };
 }
 
 export default function CutPlanViewer({ 
@@ -27,68 +375,88 @@ export default function CutPlanViewer({
   toggleSelection, 
   updatePiece, 
   onConsolidatePieces,
-  setPieces 
+  setPieces,
+  edgeThicknessConfig = DEFAULT_EDGE_THICKNESS_CONFIG,
+  onUpdateEdgeThicknessConfig,
+  onSwitchTo3D
 }: CutPlanViewerProps) {
   const [showSettings, setShowSettings] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [wheelMode, setWheelMode] = useState<'scroll' | 'zoom'>('scroll');
+  const [showZoomHint, setShowZoomHint] = useState<boolean>(false);
+  const zoomHintTimeoutRef = useRef<any>(null);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStartRef = useRef<{ x: number; y: number; originX: number; originY: number }>({ x: 0, y: 0, originX: 0, originY: 0 });
+  const [hoveredPieceId, setHoveredPieceId] = useState<string | null>(null);
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
+
   const [layoutMode, setLayoutMode] = useState<'vertical' | 'grid' | 'horizontal'>('vertical');
   const [selectedBoardFilter, setSelectedBoardFilter] = useState<number | 'all'>('all');
-  const [pieceViewMode, setPieceViewMode] = useState<'table' | 'cards'>('cards');
+  const [pieceViewMode, setPieceViewMode] = useState<'table' | 'cards'>('table');
   const [pieceSearch, setPieceSearch] = useState('');
   const [pieceListExpanded, setPieceListExpanded] = useState(false);
-  const [mobileTab, setMobileTab] = useState<'boards' | 'list' | 'both'>('boards');
-  const [showMaterialReport, setShowMaterialReport] = useState(() => window.innerWidth >= 768);
-  const [showViewOptions, setShowViewOptions] = useState(false);
+  const [mobileTab, setMobileTab] = useState<'demanda' | 'almacen' | 'boards'>('boards');
 
   // Quantity to rotate map state per piece row
   const [rotateQtyMap, setRotateQtyMap] = useState<Record<string, number>>({});
 
-  // Resizable & Collapsible Split View States (Req #2)
-  const [listPanelHeight, setListPanelHeight] = useState<number>(260); // Default 260px
-  const [isListCollapsed, setIsListCollapsed] = useState<boolean>(false);
-  const [isDraggingList, setIsDraggingList] = useState<boolean>(false);
-  const dragStartYRef = useRef<number>(0);
-  const startHeightRef = useRef<number>(260);
+  // Floating Draggable & Resizable Windows (Demanda & Almacén)
+  const [showDemanda, setShowDemanda] = useState<boolean>(false);
+  const [showAlmacen, setShowAlmacen] = useState<boolean>(false);
 
-  const handleListDragStart = (e: React.MouseEvent | React.TouchEvent) => {
-    setIsDraggingList(true);
-    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    dragStartYRef.current = clientY;
-    startHeightRef.current = listPanelHeight;
-  };
+  const {
+    position: almacenPos,
+    size: almacenSize,
+    dragProps: almacenDragProps,
+    resizeCornerProps: almacenResizeCornerProps,
+    resizeRightProps: almacenResizeRightProps,
+    resizeBottomProps: almacenResizeBottomProps
+  } = useDraggableWindow({
+    storageKey: 'iamueble_cut_almacen_win',
+    defaultPosition: () => ({
+      x: typeof window !== 'undefined' ? (window.innerWidth < 640 ? 10 : 30) : 20,
+      y: 50
+    }),
+    defaultSize: () => ({
+      width: typeof window !== 'undefined' && window.innerWidth < 640 ? 300 : 380,
+      height: typeof window !== 'undefined' && window.innerWidth < 640 ? 250 : 320
+    }),
+    minWidth: 240,
+    minHeight: 140
+  });
+
+  const {
+    position: demandaPos,
+    size: demandaSize,
+    dragProps: demandaDragProps,
+    resizeCornerProps: demandaResizeCornerProps,
+    resizeRightProps: demandaResizeRightProps,
+    resizeBottomProps: demandaResizeBottomProps
+  } = useDraggableWindow({
+    storageKey: 'iamueble_cut_demanda_win',
+    defaultPosition: () => ({
+      x: typeof window !== 'undefined' ? (window.innerWidth < 640 ? 10 : 50) : 30,
+      y: 65
+    }),
+    defaultSize: () => ({
+      width: typeof window !== 'undefined' && window.innerWidth < 640 ? 300 : 420,
+      height: typeof window !== 'undefined' && window.innerWidth < 640 ? 280 : 360
+    }),
+    minWidth: 240,
+    minHeight: 150
+  });
+
+  const [isMobile, setIsMobile] = useState<boolean>(() => typeof window !== 'undefined' ? window.innerWidth < 640 : false);
+  const [showPdfExport, setShowPdfExport] = useState<boolean>(false);
 
   useEffect(() => {
-    if (!isDraggingList) return;
-
-    const handleMove = (e: MouseEvent | TouchEvent) => {
-      const clientY = 'touches' in e ? e.touches[0].clientY : (e as MouseEvent).clientY;
-      const deltaY = dragStartYRef.current - clientY;
-      const newHeight = Math.max(44, Math.min(window.innerHeight - 150, startHeightRef.current + deltaY));
-      
-      if (newHeight <= 55) {
-        setIsListCollapsed(true);
-      } else {
-        setIsListCollapsed(false);
-        setListPanelHeight(newHeight);
-      }
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 640);
     };
-
-    const handleEnd = () => {
-      setIsDraggingList(false);
-    };
-
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleEnd);
-    window.addEventListener('touchmove', handleMove);
-    window.addEventListener('touchend', handleEnd);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleEnd);
-      window.removeEventListener('touchmove', handleMove);
-      window.removeEventListener('touchend', handleEnd);
-    };
-  }, [isDraggingList]);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Display Toggles matching Cutting Optimization Pro
   const [showPieceDims, setShowPieceDims] = useState(true);
@@ -99,52 +467,358 @@ export default function CutPlanViewer({
   const [showSheetRulers, setShowSheetRulers] = useState(true); // Outer sheet dimension lines (2420, 2120)
   const [cadTheme, setCadTheme] = useState<'light' | 'dark'>('light'); // Default light CAD style matching software screenshot
   const [isMirrored, setIsMirrored] = useState(false);
+  const [useRealMaterialColors, setUseRealMaterialColors] = useState<boolean>(true);
+  const [selectedMaterialFilter, setSelectedMaterialFilter] = useState<string>('all');
+  const [showMaterialSummaryModal, setShowMaterialSummaryModal] = useState<boolean>(false);
+
+  // Calibration for 2D graphics letters & numbers
+  const [cadTextConfig, setCadTextConfig] = useState<CadTextCalibration>(() => {
+    try {
+      const saved = localStorage.getItem('carpinteria_cad_text_calibration');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return DEFAULT_CAD_TEXT_CALIBRATION;
+  });
+
+  const updateCadTextConfig = (updates: Partial<CadTextCalibration>) => {
+    setCadTextConfig(prev => {
+      const next = { ...prev, ...updates };
+      try {
+        localStorage.setItem('carpinteria_cad_text_calibration', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const [activeSettingsTab, setActiveSettingsTab] = useState<'sheet' | 'typography' | 'stats'>('sheet');
 
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Wheel Scroll & Zoom Listener on 2D graphics canvas (separates scrolling from zooming)
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleNativeWheel = (e: WheelEvent) => {
+      if ((e.target as HTMLElement).closest('input, select, textarea, [data-no-canvas-zoom="true"]')) return;
+
+      const isZoomTrigger = wheelMode === 'zoom' || e.ctrlKey || e.metaKey || e.altKey;
+
+      if (isZoomTrigger) {
+        e.preventDefault();
+        const zoomFactor = e.deltaY < 0 ? 1.12 : 0.89;
+        setZoom(prev => Math.max(0.25, Math.min(4.0, Number((prev * zoomFactor).toFixed(2)))));
+      } else {
+        // Normal scroll: do NOT call e.preventDefault(), allow native container scrolling!
+        setShowZoomHint(true);
+        if (zoomHintTimeoutRef.current) clearTimeout(zoomHintTimeoutRef.current);
+        zoomHintTimeoutRef.current = setTimeout(() => {
+          setShowZoomHint(false);
+        }, 1800);
+      }
+    };
+
+    container.addEventListener('wheel', handleNativeWheel, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', handleNativeWheel);
+      if (zoomHintTimeoutRef.current) clearTimeout(zoomHintTimeoutRef.current);
+    };
+  }, [wheelMode]);
+
+  // Touch Pinch-to-zoom (2 fingers) and 1-finger scroll
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    let initialPinchDist: number | null = null;
+    let initialPinchZoom = 1;
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        // 2 fingers detected: pinch-to-zoom
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        initialPinchDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        initialPinchZoom = zoom;
+      } else {
+        initialPinchDist = null;
+      }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2 && initialPinchDist !== null && initialPinchDist > 0) {
+        // Prevent default browser pinch
+        e.preventDefault();
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const currentDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        const factor = currentDist / initialPinchDist;
+        const newZoom = Math.max(0.25, Math.min(4.0, Number((initialPinchZoom * factor).toFixed(2))));
+        setZoom(newZoom);
+      }
+    };
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) {
+        initialPinchDist = null;
+      }
+    };
+
+    container.addEventListener('touchstart', handleTouchStart, { passive: true });
+    container.addEventListener('touchmove', handleTouchMove, { passive: false });
+    container.addEventListener('touchend', handleTouchEnd, { passive: true });
+    container.addEventListener('touchcancel', handleTouchEnd, { passive: true });
+
+    return () => {
+      container.removeEventListener('touchstart', handleTouchStart);
+      container.removeEventListener('touchmove', handleTouchMove);
+      container.removeEventListener('touchend', handleTouchEnd);
+      container.removeEventListener('touchcancel', handleTouchEnd);
+    };
+  }, [zoom]);
+
+  const handleCanvasMouseDown = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button, input, select, a, [data-piece-rect="true"]')) {
+      return;
+    }
+    setIsPanning(true);
+    panStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      originX: pan.x,
+      originY: pan.y
+    };
+  };
+
+  const handleCanvasMouseMove = (e: React.MouseEvent) => {
+    if (!isPanning) return;
+    const dx = e.clientX - panStartRef.current.x;
+    const dy = e.clientY - panStartRef.current.y;
+    setPan({
+      x: panStartRef.current.originX + dx,
+      y: panStartRef.current.originY + dy
+    });
+  };
+
+  const handleCanvasMouseUp = () => {
+    setIsPanning(false);
+  };
   
-  const materialReport = useMemo(
-    () => buildMaterialReport(pieces, sheetConfig),
-    [pieces, sheetConfig],
-  );
-  const boardGroups = materialReport.groups;
-  const totalStats = materialReport.totals;
-  const unplacedPieces = materialReport.unplacedPieces;
-  const edgebandingTotals = {
-    thin: totalStats.thinEdgeM.toFixed(2),
-    thick: totalStats.thickEdgeM.toFixed(2),
+  const { boardGroups, totalStats } = useMemo(() => {
+    // Group pieces by material profile (substrate + material + thickness)
+    const groupsMap: Record<string, {
+      profile: ReturnType<typeof getPieceMaterialProfile>;
+      pieces: Piece[];
+    }> = {};
+
+    pieces.forEach(p => {
+      const profile = getPieceMaterialProfile(p);
+      if (!groupsMap[profile.groupKey]) {
+        groupsMap[profile.groupKey] = {
+          profile,
+          pieces: []
+        };
+      }
+      groupsMap[profile.groupKey].pieces.push(p);
+    });
+
+    const results: BoardGroup[] = [];
+    let combinedAreaUsed = 0;
+    let combinedTotalArea = 0;
+    let combinedBoardsCount = 0;
+
+    Object.values(groupsMap).forEach(({ profile, pieces: groupPieces }) => {
+      let groupConfig = { ...sheetConfig };
+      if (profile.substrate === 'mdf' && profile.thickness === 3) {
+        groupConfig = { ...sheetConfig, width: 2440, height: 1850 };
+      } else if (profile.substrate === 'vidrio') {
+        groupConfig = { ...sheetConfig, width: 2500, height: 1800, margin: 10, kerf: 3 };
+      }
+
+      const packed = professionalPack(groupPieces, groupConfig, edgeThicknessConfig);
+
+      let edgeThin = 0;
+      let edgeThick = 0;
+      let piecesCount = 0;
+
+      groupPieces.forEach(p => {
+        const qty = p.cantidad;
+        piecesCount += qty;
+        if (!p.cantos || profile.substrate === 'vidrio') return;
+        const edges = [
+          { type: p.cantos.largo1, length: p.largo },
+          { type: p.cantos.largo2, length: p.largo },
+          { type: p.cantos.ancho1, length: p.ancho },
+          { type: p.cantos.ancho2, length: p.ancho }
+        ];
+        edges.forEach(e => {
+          if (e.type === 'Canto Delgado') edgeThin += e.length * qty;
+          else if (e.type === 'Canto Grueso') edgeThick += e.length * qty;
+        });
+      });
+
+      results.push({
+        groupKey: profile.groupKey,
+        substrate: profile.substrate,
+        substrateLabel: profile.substrateLabel,
+        materialName: profile.materialName,
+        materialColor: profile.color,
+        displayName: profile.displayName,
+        code: profile.code,
+        thickness: profile.thickness,
+        isWood: profile.isWood,
+        isGlass: profile.isGlass,
+        textureUrl: profile.textureUrl,
+        boards: packed.boards,
+        stats: packed.stats,
+        config: groupConfig,
+        piecesCount,
+        edgeThin: edgeThin / 1000,
+        edgeThick: edgeThick / 1000
+      });
+
+      combinedAreaUsed += packed.stats.areaUsed;
+      combinedTotalArea += packed.stats.totalArea;
+      combinedBoardsCount += packed.stats.boardsCount;
+    });
+
+    const efficiency = combinedTotalArea > 0 ? (combinedAreaUsed / combinedTotalArea) * 100 : 0;
+
+    return { 
+      boardGroups: results, 
+      totalStats: {
+        efficiency,
+        areaUsed: combinedAreaUsed,
+        totalArea: combinedTotalArea,
+        boardsCount: combinedBoardsCount
+      }
+    };
+  }, [pieces, sheetConfig, edgeThicknessConfig]);
+
+  const edgebandingTotals = useMemo(() => {
+    let thin = 0;
+    let thick = 0;
+    
+    pieces.forEach(p => {
+      const qty = p.cantidad;
+      const { largo, ancho, cantos } = p;
+      if (!cantos) return;
+      
+      const edges = [
+        { type: cantos.largo1, length: largo },
+        { type: cantos.largo2, length: largo },
+        { type: cantos.ancho1, length: ancho },
+        { type: cantos.ancho2, length: ancho }
+      ];
+
+      edges.forEach(e => {
+        if (e.type === 'Canto Delgado') thin += e.length * qty;
+        else if (e.type === 'Canto Grueso') thick += e.length * qty;
+      });
+    });
+
+    return {
+      thin: (thin / 1000).toFixed(2),
+      thick: (thick / 1000).toFixed(2)
+    };
+  }, [pieces]);
+
+  // Flatten all boards across all material groups into a unified list with global 1-based indexing
+  const flatBoardsList = useMemo(() => {
+    const list: Array<{
+      globalIndex: number; // 0-based: 0, 1, 2...
+      boardNumber: number; // 1-based: 1, 2, 3...
+      group: BoardGroup;
+      board: PackedBoard;
+      boardIndexInGroup: number;
+    }> = [];
+
+    let count = 0;
+    boardGroups.forEach(group => {
+      group.boards.forEach((board, bIdxInGroup) => {
+        count++;
+        list.push({
+          globalIndex: count - 1,
+          boardNumber: count,
+          group,
+          board,
+          boardIndexInGroup: bIdxInGroup
+        });
+      });
+    });
+    return list;
+  }, [boardGroups]);
+
+  // Current boards to render in the 2D CAD canvas
+  const boardsToRender = useMemo(() => {
+    if (selectedBoardFilter === 'all') {
+      return flatBoardsList;
+    }
+    return flatBoardsList.filter(b => b.globalIndex === selectedBoardFilter);
+  }, [flatBoardsList, selectedBoardFilter]);
+
+  const activeBoardItem = useMemo(() => {
+    if (selectedBoardFilter === 'all') return null;
+    return flatBoardsList.find(b => b.globalIndex === selectedBoardFilter) || null;
+  }, [flatBoardsList, selectedBoardFilter]);
+
+  // Reset selected board filter if the index exceeds available boards count
+  useEffect(() => {
+    if (selectedBoardFilter !== 'all' && typeof selectedBoardFilter === 'number' && selectedBoardFilter >= flatBoardsList.length) {
+      setSelectedBoardFilter('all');
+    }
+  }, [flatBoardsList.length, selectedBoardFilter]);
+
+  const [viewScale, setViewScale] = useState(0.40);
+
+  const calculateOptimalScale = () => {
+    if (containerRef.current) {
+      const cw = containerRef.current.clientWidth;
+      const ch = containerRef.current.clientHeight;
+      const isMobile = window.innerWidth < 640;
+      const paddingW = isMobile ? 12 : 32;
+      const paddingH = isMobile ? 16 : 40;
+      
+      const targetW = activeBoardItem ? activeBoardItem.group.config.width : sheetConfig.width;
+      const targetH = activeBoardItem ? activeBoardItem.group.config.height : sheetConfig.height;
+
+      const scaleW = (cw - paddingW) / targetW;
+      const scaleH = (ch - paddingH) / targetH;
+      
+      let scale = selectedBoardFilter !== 'all'
+        ? Math.min(scaleW * 0.95, scaleH * 0.88)
+        : Math.min(scaleW * 0.95, isMobile ? 0.50 : 0.85);
+
+      if (isMobile) {
+        scale = Math.max(scaleW * 0.96, 0.15);
+      }
+
+      return scale > 0 ? scale : 0.40;
+    }
+    return 0.40;
   };
 
   useEffect(() => {
-    if (selectedBoardFilter !== 'all' && selectedBoardFilter >= totalStats.boardsCount) {
-      setSelectedBoardFilter('all');
-    }
-  }, [selectedBoardFilter, totalStats.boardsCount]);
+    const scale = calculateOptimalScale();
+    setViewScale(scale);
+  }, [sheetConfig.width, sheetConfig.height, selectedBoardFilter, activeBoardItem]);
 
-  const [viewScale, setViewScale] = useState(0.18);
-
-  useEffect(() => {
+  // Fit to Screen centering handler
+  const handleFitToScreen = () => {
     if (containerRef.current) {
-        const cw = containerRef.current.clientWidth;
-        const ch = containerRef.current.clientHeight;
-        const isMobile = window.innerWidth < 640;
-        const paddingW = isMobile ? 16 : 80;
-        const paddingH = isMobile ? 16 : 80;
-        
-        const scaleW = (cw - paddingW) / sheetConfig.width;
-        const scaleH = (ch - paddingH) / sheetConfig.height;
-        
-        let scale = layoutMode === 'vertical'
-          ? Math.min(scaleW, isMobile ? 0.35 : 0.38)
-          : Math.min(scaleW, scaleH);
-
-        if (isMobile) {
-          scale = Math.max(scaleW, 0.12);
-        }
-
-        setViewScale(scale > 0 ? scale : 0.18);
+      const cw = containerRef.current.clientWidth - 28;
+      const ch = containerRef.current.clientHeight - 64;
+      const targetScale = Math.min(cw / sheetConfig.width, ch / sheetConfig.height);
+      if (targetScale > 0 && viewScale > 0) {
+        const optimalZoom = targetScale / viewScale;
+        setZoom(Math.max(0.4, Math.min(3.0, Number(optimalZoom.toFixed(2)))));
+      } else {
+        setZoom(1);
+      }
+      setPan({ x: 0, y: 0 });
     }
-  }, [sheetConfig.width, sheetConfig.height, layoutMode]);
+  };
 
   const groupedPieces = useMemo(() => {
     const groups: {
@@ -183,6 +857,55 @@ export default function CutPlanViewer({
       (g.representative.material || '').toLowerCase().includes(term)
     );
   }, [groupedPieces, pieceSearch]);
+
+  const materialSections = useMemo(() => {
+    const map: Record<string, {
+      id: string;
+      code: string;
+      name: string;
+      thickness: number;
+      groups: typeof filteredGroupedPieces;
+      totalPieces: number;
+    }> = {};
+
+    filteredGroupedPieces.forEach(group => {
+      const p = group.representative;
+      const thickness = p.espesor || 18;
+      const rawMat = (p.material || 'Blanco').trim();
+      const upperMat = rawMat.toUpperCase();
+
+      let prefix = 'BL';
+      if (upperMat.includes('ROBLE') || upperMat.includes('WOOD') || upperMat.includes('MADERA') || upperMat.includes('CEDRO') || upperMat.includes('NOGAL')) {
+        prefix = 'RO';
+      } else if (upperMat.includes('NEGRO') || upperMat.includes('BLACK')) {
+        prefix = 'NE';
+      } else if (upperMat.includes('GRIS') || upperMat.includes('GREY')) {
+        prefix = 'GR';
+      } else if (upperMat.includes('DUPROLAC') || upperMat.includes('MDF') || thickness === 3) {
+        prefix = 'DUP';
+      } else {
+        prefix = upperMat.slice(0, 2).replace(/[^A-Z]/g, '') || 'BL';
+      }
+
+      const code = `${prefix}${thickness}`;
+      const sectionKey = `${code}-${upperMat}`;
+
+      if (!map[sectionKey]) {
+        map[sectionKey] = {
+          id: sectionKey,
+          code,
+          name: upperMat,
+          thickness,
+          groups: [],
+          totalPieces: 0
+        };
+      }
+      map[sectionKey].groups.push(group);
+      map[sectionKey].totalPieces += group.totalQuantity;
+    });
+
+    return Object.values(map);
+  }, [filteredGroupedPieces]);
 
   const currentScale = viewScale * zoom;
 
@@ -297,13 +1020,24 @@ export default function CutPlanViewer({
     }
   }, [selectedPieceIds, groupedPieces]);
 
+  // Rotación global: verifica si todas las piezas tienen permitida la rotación a 90° (desactivado por defecto)
+  const allPiecesRotatable = pieces.length > 0 && pieces.every(p => !p.veta && p.rotacion === true);
+  const handleToggleGlobalRotation = () => {
+    const nextVal = !allPiecesRotatable;
+    setPieces(prev => prev.map(p => ({
+      ...p,
+      rotacion: nextVal,
+      ...(nextVal ? { veta: false } : {}),
+    })));
+  };
+
   if (pieces.length === 0) {
     return (
-      <div className="absolute inset-0 bg-[#16191d] flex items-center justify-center px-6">
+      <div className="absolute inset-0 bg-[#393939] flex items-center justify-center">
         <div className="text-center group">
-          <Layers className="w-10 h-10 text-[#f0a144]/35 mx-auto mb-4 group-hover:text-[#f0a144]/60 transition-colors" />
-          <p className="text-[#eef2f6] font-semibold text-base">Todavía no hay piezas para cortar</p>
-          <p className="text-[#89939f] text-sm mt-2">Vuelve a Diseño 3D y crea una pieza o abre la biblioteca de módulos.</p>
+          <Layers className="w-12 h-12 text-[#222222] mx-auto mb-4 group-hover:text-[#f0a144]/50 transition-colors" />
+          <p className="text-[#888888] font-mono text-sm uppercase tracking-widest">Plano de corte vacío</p>
+          <p className="text-[#666666] text-[10px] uppercase mt-2">Añade piezas en el panel lateral para optimizar</p>
         </div>
       </div>
     );
@@ -312,178 +1046,135 @@ export default function CutPlanViewer({
   const isLightCAD = cadTheme === 'light';
 
   return (
-    <div className="absolute inset-0 bg-[#16191d] flex flex-col overflow-hidden w-full max-w-full font-sans">
+    <div className="absolute inset-0 bg-[#282828] flex flex-col overflow-hidden w-full max-w-full font-sans">
       {/* Top Header */}
-      <div className="h-12 sm:h-14 border-b border-white/10 bg-[#171a1f] flex items-center justify-between px-2 sm:px-4 shrink-0 relative z-20 w-full max-w-full overflow-hidden">
+      <div className="h-12 sm:h-14 border-b border-[#1e1e1e] bg-[#222222] flex items-center justify-between px-2 sm:px-4 shrink-0 shadow-lg relative z-20 w-full max-w-full overflow-hidden">
         <div className="flex items-center gap-2 sm:gap-4 overflow-x-auto no-scrollbar py-1 min-w-0">
           <div className="flex items-center gap-1.5 shrink-0">
             <Scissors className="w-4 h-4 text-[#f0a144]" />
-            <h2 className="text-[12px] sm:text-sm font-semibold text-white tracking-wide hidden sm:block">Corte 2D</h2>
+            <h2 className="text-[10px] sm:text-[11px] font-bold text-white uppercase tracking-widest hidden sm:block">Plano de Corte 2D</h2>
           </div>
           
-          {/* Mobile Main Tab Switcher */}
-          <div className="flex sm:hidden items-center bg-[#111111] border border-[#f0a144]/40 p-0.5 rounded-lg shrink-0 shadow-inner">
+          {/* Mobile Main Switcher (Práctico en Celular) */}
+          <div className="flex sm:hidden items-center bg-[#141414] border border-[#383838] p-0.5 rounded-lg shrink-0 shadow-inner">
             <button
-              onClick={() => setMobileTab('boards')}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase transition-all ${mobileTab === 'boards' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
+              type="button"
+              onClick={() => {
+                setShowDemanda(!showDemanda);
+                if (!showDemanda) setShowAlmacen(false);
+              }}
+              className={`flex items-center gap-1 px-2 py-1.5 rounded text-[9.5px] font-bold uppercase transition-all ${showDemanda ? 'bg-[#f0a144] text-black font-black shadow' : 'text-[#aaa] hover:text-white'}`}
+            >
+              <ClipboardList className="w-3 h-3" />
+              <span>Demanda</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowAlmacen(!showAlmacen);
+                if (!showAlmacen) setShowDemanda(false);
+              }}
+              className={`flex items-center gap-1 px-2 py-1.5 rounded text-[9.5px] font-bold uppercase transition-all ${showAlmacen ? 'bg-[#f0a144] text-black font-black shadow' : 'text-[#aaa] hover:text-white'}`}
+            >
+              <Warehouse className="w-3 h-3" />
+              <span>Almacén</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowDemanda(false);
+                setShowAlmacen(false);
+              }}
+              className={`flex items-center gap-1 px-2 py-1.5 rounded text-[9.5px] font-bold uppercase transition-all ${!showDemanda && !showAlmacen ? 'bg-[#f0a144] text-black font-black shadow' : 'text-[#aaa] hover:text-white'}`}
             >
               <Scissors className="w-3 h-3" />
-              <span>Planchas</span>
+              <span>Plano 2D</span>
             </button>
+            {onSwitchTo3D && (
+              <button
+                type="button"
+                onClick={onSwitchTo3D}
+                className="flex items-center gap-1 px-2 py-1.5 rounded text-[9.5px] font-bold uppercase text-blue-400 hover:text-white hover:bg-blue-600/30 transition-all ml-0.5"
+                title="Ver Gráficos 3D en Celular"
+              >
+                <Box className="w-3 h-3" />
+                <span>3D</span>
+              </button>
+            )}
+          </div>
+
+          {/* Desktop Independent Window Toggles (1 Clic para abrir / replegar) */}
+          <div className="hidden sm:flex items-center bg-[#161616] border border-[#333333] p-0.5 rounded-lg shrink-0 gap-0.5">
             <button
-              onClick={() => setMobileTab('list')}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase transition-all ${mobileTab === 'list' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
+              type="button"
+              onClick={() => setShowDemanda(!showDemanda)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[9px] font-bold uppercase transition-colors ${showDemanda ? 'bg-[#f0a144] text-black shadow font-black' : 'text-[#999] hover:text-white'}`}
+              title="Abrir o replegar ventana de Demanda hacia el lado izquierdo"
             >
-              <Layers3 className="w-3 h-3" />
-              <span>Piezas</span>
+              <ClipboardList className="w-3 h-3" />
+              <span>1. Demanda</span>
+              {showDemanda && <ChevronsLeft className="w-2.5 h-2.5 opacity-70" />}
             </button>
             <button
-              onClick={() => setMobileTab('both')}
-              className={`flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-all ${mobileTab === 'both' ? 'bg-[#f0a144] text-black shadow' : 'text-[#888888] hover:text-white'}`}
-              title="Ver Ambos en Pantalla Dividida"
+              type="button"
+              onClick={() => setShowAlmacen(!showAlmacen)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[9px] font-bold uppercase transition-colors ${showAlmacen ? 'bg-[#f0a144] text-black shadow font-black' : 'text-[#999] hover:text-white'}`}
+              title="Abrir o replegar ventana de Almacén hacia el lado izquierdo"
+            >
+              <Warehouse className="w-3 h-3" />
+              <span>2. Almacén</span>
+              {showAlmacen && <ChevronsLeft className="w-2.5 h-2.5 opacity-70" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (showDemanda || showAlmacen) {
+                  setShowDemanda(false);
+                  setShowAlmacen(false);
+                } else {
+                  setShowDemanda(true);
+                }
+              }}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-[9px] font-bold uppercase transition-colors ${!showDemanda && !showAlmacen ? 'bg-amber-600/25 text-[#f0a144] border border-[#f0a144]/40 font-bold' : 'text-[#777] hover:text-white'}`}
+              title="Replegar ambas ventanas para ver solo el plano de corte 2D / 3D al 100%"
             >
               <LayoutList className="w-3 h-3" />
+              <span>{!showDemanda && !showAlmacen ? 'Solo Plano (100%)' : 'Solo Plano'}</span>
             </button>
           </div>
 
-          <div className="hidden sm:block h-4 w-px bg-white/10 mx-1 shrink-0"></div>
+          <div className="hidden sm:block h-4 w-px bg-[#444444] mx-1 shrink-0"></div>
 
-          <div className="hidden sm:flex gap-3 lg:gap-5 shrink-0 items-center">
+          {/* Quick Metrics Bar */}
+          <div className="hidden sm:flex gap-2 sm:gap-4 shrink-0 items-center">
             <div className="flex flex-col">
-              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Piezas</span>
-              <span className="text-xs font-mono font-semibold text-white">{totalStats.piecesCount}</span>
-            </div>
-            <div className="hidden md:flex flex-col">
-              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Materiales</span>
-              <span className="text-xs font-mono font-semibold text-white">{totalStats.materialGroups}</span>
-            </div>
-            <div className="flex flex-col">
-              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Planchas</span>
-              <span className="text-xs font-mono font-semibold text-white">{totalStats.boardsCount}</span>
-            </div>
-            <div className="hidden lg:flex flex-col">
-              <span className="text-[10px] text-[#7f8995] uppercase tracking-wider">Rendimiento</span>
-              <span className={`text-xs font-mono font-semibold ${totalStats.efficiency >= 80 ? 'text-emerald-400' : totalStats.efficiency >= 65 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
+              <span className="text-[7px] sm:text-[8px] text-[#aaaaaa] uppercase tracking-tighter">Efic. Total</span>
+              <span className={`text-[10px] sm:text-xs font-mono font-bold ${totalStats.efficiency > 85 ? 'text-emerald-400' : totalStats.efficiency > 70 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
                 {totalStats.efficiency.toFixed(1)}%
               </span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[7px] sm:text-[8px] text-[#aaaaaa] uppercase tracking-tighter">Planchas</span>
+              <span className="text-[10px] sm:text-xs font-mono font-bold text-white">{totalStats.boardsCount}</span>
+            </div>
+            <div className="flex flex-col hidden xs:flex">
+              <span className="text-[7px] sm:text-[8px] text-[#aaaaaa] uppercase tracking-tighter">Área Útil</span>
+              <span className="text-[10px] sm:text-xs font-mono font-bold text-[#cccccc]">{(totalStats.areaUsed / 1000000).toFixed(2)}m²</span>
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => setShowMaterialReport(value => !value)}
-            className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors ${showMaterialReport ? 'bg-[#f0a144]/15 border border-[#f0a144]/50 text-[#f7b766]' : 'bg-white/[0.03] border border-white/10 text-[#aab2bc] hover:text-white'}`}
-            aria-expanded={showMaterialReport}
-          >
-            <BarChart3 className="w-3.5 h-3.5" />
-            <span className="hidden xs:inline">Materiales</span>
-          </button>
           <button 
             type="button"
             onClick={() => setShowSettings(!showSettings)}
-            className={`flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-colors shrink-0 ${showSettings ? 'bg-[#f0a144] text-black' : 'bg-white/[0.03] border border-white/10 text-[#aab2bc] hover:text-white'}`}
+            className={`flex items-center gap-1 sm:gap-2 px-2 sm:px-3 py-1.5 rounded text-[9px] sm:text-[10px] font-bold uppercase transition-all shrink-0 ${showSettings ? 'bg-[#f0a144] text-black shadow-lg font-black' : 'bg-[#181818] border border-[#333333] text-[#aaaaaa] hover:bg-[#333333] hover:text-white'}`}
           >
             <Settings className={`w-3.5 h-3.5 ${showSettings ? 'animate-spin-slow' : ''}`} />
-            <span className="hidden xs:inline">Ajustes</span>
+            <span className="hidden sm:inline">Ajustes</span>
           </button>
         </div>
       </div>
-
-      {unplacedPieces.length > 0 && (
-        <div className="shrink-0 px-3 sm:px-4 py-2.5 bg-rose-950/45 border-b border-rose-500/30 text-rose-100 flex items-start gap-2.5 z-20" role="alert">
-          <div className="w-5 h-5 rounded-full bg-rose-500/20 flex items-center justify-center text-rose-300 font-black text-xs shrink-0">!</div>
-          <div className="min-w-0">
-            <div className="text-xs font-extrabold">{unplacedPieces.length} {unplacedPieces.length === 1 ? 'pieza no cabe' : 'piezas no caben'} en la plancha configurada</div>
-            <div className="text-[13px] text-rose-200/75 truncate mt-0.5">{unplacedPieces.join(' · ')}</div>
-          </div>
-        </div>
-      )}
-
-      {showMaterialReport && (
-        <section className="shrink-0 max-h-[42vh] overflow-auto bg-[#13161a] border-b border-white/10 px-3 sm:px-4 py-3" aria-label="Cálculo de materiales">
-          <div className="flex items-center justify-between gap-4 mb-3">
-            <div>
-              <h3 className="text-sm font-semibold text-white">Cálculo de materiales</h3>
-              <p className="text-[11px] text-[#7f8995] mt-0.5">Compra estimada según material, color y espesor.</p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowMaterialReport(false)}
-              className="text-[11px] font-medium text-[#89939f] hover:text-white transition-colors"
-            >
-              Ocultar
-            </button>
-          </div>
-
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
-            {[
-              { label: 'Área de piezas', value: `${totalStats.requiredAreaM2.toFixed(2)} m²` },
-              { label: 'Área a comprar', value: `${totalStats.purchaseAreaM2.toFixed(2)} m²` },
-              { label: 'Merma estimada', value: `${totalStats.wasteAreaM2.toFixed(2)} m²` },
-              { label: 'Cantos', value: `${(totalStats.thinEdgeM + totalStats.thickEdgeM).toFixed(2)} m` },
-            ].map(metric => (
-              <div key={metric.label} className="rounded-lg border border-white/[0.08] bg-white/[0.025] px-3 py-2">
-                <div className="text-[10px] uppercase tracking-wider text-[#727d89]">{metric.label}</div>
-                <div className="mt-0.5 text-sm font-mono font-semibold text-[#edf1f5]">{metric.value}</div>
-              </div>
-            ))}
-          </div>
-
-          <div className="overflow-x-auto rounded-lg border border-white/[0.08]">
-            <table className="w-full min-w-[880px] text-left text-[11px]">
-              <thead className="bg-white/[0.035] text-[#7f8995] uppercase tracking-wider">
-                <tr>
-                  <th className="px-3 py-2 font-medium">Material</th>
-                  <th className="px-3 py-2 font-medium">Espesor</th>
-                  <th className="px-3 py-2 font-medium">Formato</th>
-                  <th className="px-3 py-2 font-medium text-right">Piezas</th>
-                  <th className="px-3 py-2 font-medium text-right">Planchas</th>
-                  <th className="px-3 py-2 font-medium text-right">Área piezas</th>
-                  <th className="px-3 py-2 font-medium text-right">Área compra</th>
-                  <th className="px-3 py-2 font-medium text-right">Merma</th>
-                  <th className="px-3 py-2 font-medium text-right">Rendimiento</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/[0.06] text-[#c9d0d8]">
-                {boardGroups.map(group => (
-                  <tr key={group.key} className="hover:bg-white/[0.025]">
-                    <td className="px-3 py-2.5">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span
-                          className="w-3 h-3 rounded-sm border border-white/20 shrink-0"
-                          style={{ backgroundColor: group.color || '#e7e4dc' }}
-                        />
-                        <span className="font-medium text-white truncate max-w-[220px]">{group.material}</span>
-                        {group.unplaced.length > 0 && (
-                          <span className="rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">Revisar</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2.5 font-mono">{group.thickness} mm</td>
-                    <td className="px-3 py-2.5 font-mono">{group.config.width} × {group.config.height} mm</td>
-                    <td className="px-3 py-2.5 text-right font-mono">{group.piecesCount}</td>
-                    <td className="px-3 py-2.5 text-right font-mono font-semibold text-white">{group.stats.boardsCount}</td>
-                    <td className="px-3 py-2.5 text-right font-mono">{group.requiredAreaM2.toFixed(2)} m²</td>
-                    <td className="px-3 py-2.5 text-right font-mono">{group.purchaseAreaM2.toFixed(2)} m²</td>
-                    <td className="px-3 py-2.5 text-right font-mono text-rose-300">{group.wasteAreaM2.toFixed(2)} m²</td>
-                    <td className={`px-3 py-2.5 text-right font-mono font-semibold ${group.stats.efficiency >= 80 ? 'text-emerald-400' : group.stats.efficiency >= 65 ? 'text-[#f0a144]' : 'text-rose-400'}`}>
-                      {group.stats.efficiency.toFixed(1)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-[#7f8995]">
-            <span>Canto delgado <strong className="ml-1 font-mono text-[#76a9ff]">{edgebandingTotals.thin} m</strong></span>
-            <span>Canto grueso <strong className="ml-1 font-mono text-[#ff8181]">{edgebandingTotals.thick} m</strong></span>
-            <span>Merma incluye cortes de sierra y refilado.</span>
-          </div>
-        </section>
-      )}
 
       <div className="flex-1 flex overflow-hidden relative">
         {/* Mobile Settings Overlay Backdrop */}
@@ -494,151 +1185,435 @@ export default function CutPlanViewer({
           />
         )}
         
-        {/* Main Content Area */}
-        <div className="flex-1 flex flex-col min-h-0 bg-[#1e1e1e] relative">
-          
-          {/* BANDEJA SUPERIOR 1: NAVEGACIÓN DE PLANCHAS, DATOS Y ZOOM (REQ #1) */}
+        {/* ========================================================================= */}
+        {/* 3-WINDOW WORKFLOW (SIDE-BY-SIDE INTERFACE)                                 */}
+        {/* Window 1: DEMANDA (Listado de Despiece)                                    */}
+        {/* Window 2: ALMACÉN (Inventario de Planchas & Formatos de Stock)              */}
+        {/* Window 3: DIAGRAMA DE CORTE 2D (Plano CAD Interactivo)                     */}
+        {/* ========================================================================= */}
+
+        {/* ========================================================================= */}
+        {/* VENTANAS FLOTANTES Y ARRASTRABLES: DEMANDA Y ALMACÉN                       */}
+        {/* Exactamente como Bandeja y Catálogo: flotantes, arrastrables y redimensionables */}
+        {/* ========================================================================= */}
+
+        {/* VENTANA FLOTANTE 1: DEMANDA (Listado de Despiece) */}
+        {showDemanda && (
+          <div
+            className="fixed z-40 pointer-events-auto select-none"
+            style={{ left: `${demandaPos.x}px`, top: `${demandaPos.y}px` }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div
+              className="bg-[#14151a]/95 backdrop-blur-md border border-[#2d313d] rounded-xl sm:rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden text-gray-200 relative group"
+              style={{ width: `${demandaSize.width}px`, height: `${demandaSize.height}px` }}
+            >
+              {/* Header (Draggable handle) */}
+              <div
+                className="h-7 sm:h-8 bg-[#101115] border-b border-[#22242e] flex items-center justify-between px-2 sm:px-2.5 shrink-0 select-none cursor-grab active:cursor-grabbing"
+                {...demandaDragProps}
+                title="Arrastrar ventana de Demanda"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <GripHorizontal className="w-3 h-3 text-gray-500 shrink-0" />
+                  <ClipboardList className="w-3.5 h-3.5 text-[#f0a144] shrink-0" />
+                  <span className="text-[9.5px] sm:text-[10px] font-black uppercase text-[#e5e5e5] tracking-wider truncate">
+                    1. Demanda
+                  </span>
+                  <span className="bg-[#222] text-[#f0a144] px-1 py-0.2 rounded text-[7px] font-mono shrink-0">
+                    {pieces.reduce((a, b) => a + b.cantidad, 0)} pzs
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  <div className="relative flex items-center bg-[#1c1c1c] border border-[#2e2e2e] rounded px-1.5 py-0.2">
+                    <Search className="w-2.5 h-2.5 text-[#666] mr-1 shrink-0" />
+                    <input
+                      type="text"
+                      value={pieceSearch}
+                      onChange={(e) => setPieceSearch(e.target.value)}
+                      placeholder="Buscar..."
+                      className="bg-transparent border-none outline-none text-[8px] text-white placeholder-[#555] w-12 xs:w-16 py-0.2"
+                    />
+                  </div>
+
+                  {onConsolidatePieces && (
+                    <button
+                      type="button"
+                      onClick={onConsolidatePieces}
+                      className="hidden xs:flex items-center gap-0.5 px-1 py-0.5 bg-[#202020] hover:bg-[#333] text-[#bbb] hover:text-white text-[7px] font-bold uppercase rounded border border-[#303030]"
+                      title="Agrupar piezas idénticas"
+                    >
+                      Agrupar
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setShowDemanda(false)}
+                    className="text-gray-400 hover:text-white p-0.5 rounded hover:bg-white/10 transition-colors cursor-pointer flex items-center justify-center"
+                    title="Cerrar ventana de Demanda"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div 
+                className="flex-1 overflow-y-auto overflow-x-hidden bg-[#0d0e12] [scrollbar-width:thin]"
+                ref={listRef}
+              >
+                <CutPiecesTable
+                  pieces={pieces}
+                  groupedPieces={filteredGroupedPieces}
+                  selectedPieceIds={selectedPieceIds}
+                  toggleSelection={toggleSelection}
+                  updatePiece={updatePiece}
+                  setPieces={setPieces}
+                  edgeThicknessConfig={edgeThicknessConfig}
+                  hoveredPieceId={hoveredPieceId}
+                  setHoveredPieceId={setHoveredPieceId}
+                  onSwitchTo3D={onSwitchTo3D}
+                />
+              </div>
+
+              {/* Border and Corner Resize Handles */}
+              <div 
+                className="absolute top-0 right-0 w-2 h-full cursor-ew-resize hover:bg-[#f0a144]/30 z-20 transition-colors"
+                {...demandaResizeRightProps}
+                title="Arrastrar borde para cambiar ancho"
+              />
+              <div 
+                className="absolute bottom-0 left-0 w-full h-2 cursor-ns-resize hover:bg-[#f0a144]/30 z-20 transition-colors"
+                {...demandaResizeBottomProps}
+                title="Arrastrar borde para cambiar alto"
+              />
+              <div 
+                className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize z-30 flex items-end justify-end p-0.5 text-gray-400 hover:text-[#f0a144] hover:bg-[#f0a144]/20 rounded-br-xl transition-all"
+                {...demandaResizeCornerProps}
+                title="Reducir o ampliar tamaño de Demanda"
+              >
+                <svg className="w-2.5 h-2.5 pointer-events-none" viewBox="0 0 6 6" fill="currentColor">
+                  <circle cx="5" cy="5" r="0.75" />
+                  <circle cx="5" cy="2.5" r="0.75" />
+                  <circle cx="2.5" cy="5" r="0.75" />
+                </svg>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* VENTANA FLOTANTE 2: ALMACÉN (Inventario de Planchas & Formatos) */}
+        {showAlmacen && (
+          <div
+            className="fixed z-40 pointer-events-auto select-none"
+            style={{ left: `${almacenPos.x}px`, top: `${almacenPos.y}px` }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div
+              className="bg-[#14151a]/95 backdrop-blur-md border border-[#2d313d] rounded-xl sm:rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden text-gray-200 relative group"
+              style={{ width: `${almacenSize.width}px`, height: `${almacenSize.height}px` }}
+            >
+              {/* Header (Draggable handle) */}
+              <div
+                className="h-7 sm:h-8 bg-[#101115] border-b border-[#22242e] flex items-center justify-between px-2 sm:px-2.5 shrink-0 select-none cursor-grab active:cursor-grabbing"
+                {...almacenDragProps}
+                title="Arrastrar ventana de Almacén"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <GripHorizontal className="w-3 h-3 text-gray-500 shrink-0" />
+                  <Warehouse className="w-3.5 h-3.5 text-[#f0a144] shrink-0" />
+                  <span className="text-[9.5px] sm:text-[10px] font-black uppercase text-[#e5e5e5] tracking-wider truncate">
+                    2. Almacén
+                  </span>
+                  <span className="bg-[#222] text-[#f0a144] px-1 py-0.2 rounded text-[7px] font-mono shrink-0">
+                    {totalStats.boardsCount} plancha{totalStats.boardsCount > 1 ? 's' : ''}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowAlmacen(false)}
+                    className="text-gray-400 hover:text-white p-0.5 rounded hover:bg-white/10 transition-colors cursor-pointer flex items-center justify-center"
+                    title="Cerrar ventana de Almacén"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto overflow-x-hidden bg-[#0d0e12] [scrollbar-width:thin]">
+                <StockSheetsTable
+                  sheetConfig={sheetConfig}
+                  onUpdateSheetConfig={onUpdateSheetConfig}
+                  boardGroups={boardGroups}
+                  totalStats={totalStats}
+                />
+              </div>
+
+              {/* Border and Corner Resize Handles */}
+              <div 
+                className="absolute top-0 right-0 w-2 h-full cursor-ew-resize hover:bg-[#f0a144]/30 z-20 transition-colors"
+                {...almacenResizeRightProps}
+                title="Arrastrar borde para cambiar ancho"
+              />
+              <div 
+                className="absolute bottom-0 left-0 w-full h-2 cursor-ns-resize hover:bg-[#f0a144]/30 z-20 transition-colors"
+                {...almacenResizeBottomProps}
+                title="Arrastrar borde para cambiar alto"
+              />
+              <div 
+                className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize z-30 flex items-end justify-end p-0.5 text-gray-400 hover:text-[#f0a144] hover:bg-[#f0a144]/20 rounded-br-xl transition-all"
+                {...almacenResizeCornerProps}
+                title="Reducir o ampliar tamaño de Almacén"
+              >
+                <svg className="w-2.5 h-2.5 pointer-events-none" viewBox="0 0 6 6" fill="currentColor">
+                  <circle cx="5" cy="5" r="0.75" />
+                  <circle cx="5" cy="2.5" r="0.75" />
+                  <circle cx="2.5" cy="5" r="0.75" />
+                </svg>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* RIGHT MAIN AREA: VENTANA 3 (DIAGRAMA DE CORTE 2D / PLANO CAD)            */}
+        {/* ========================================================================= */}
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 bg-[#1e1e1e] relative overflow-hidden">
+          {/* BANDEJA SUPERIOR 1: NAVEGACIÓN DE PLANCHAS, DATOS Y ZOOM */}
           <div className="bg-[#181818] border-b border-[#2a2a2a] px-2 sm:px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 shrink-0 shadow-md z-20">
             {/* Sheet Selector Tabs */}
             <div className="flex items-center gap-1 overflow-x-auto max-w-full no-scrollbar py-0.5">
-              <span className="text-[12px] font-bold text-[#888888] uppercase tracking-wider mr-1 hidden lg:inline">Planchas:</span>
+              <div className="flex items-center gap-1 mr-1 text-[9px] font-bold text-[#888888] uppercase tracking-wider hidden lg:flex">
+                <Scissors className="w-3.5 h-3.5 text-[#f0a144]" />
+                <span>3. DIAGRAMA:</span>
+              </div>
               <button
-                onClick={() => setSelectedBoardFilter('all')}
-                className={`px-2.5 py-1 rounded-lg text-[12px] sm:text-[12px] font-bold uppercase transition-colors shrink-0 ${selectedBoardFilter === 'all' ? 'bg-[#f0a144] text-black shadow font-black' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
+                type="button"
+                onClick={() => {
+                  setSelectedBoardFilter('all');
+                  setPan({ x: 0, y: 0 });
+                }}
+                className={`px-2.5 py-1 rounded-lg text-[9px] sm:text-[10px] font-bold uppercase transition-colors shrink-0 cursor-pointer ${selectedBoardFilter === 'all' ? 'bg-[#f0a144] text-black shadow font-black' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
               >
-                Todas ({totalStats.boardsCount})
+                Todas ({flatBoardsList.length})
               </button>
-              {Array.from({ length: totalStats.boardsCount }).map((_, bIdx) => (
+              {flatBoardsList.map((item) => (
                 <button
-                  key={bIdx}
-                  onClick={() => setSelectedBoardFilter(bIdx)}
-                  className={`px-2 py-1 rounded-lg text-[12px] sm:text-[12px] font-mono font-bold uppercase transition-colors shrink-0 ${selectedBoardFilter === bIdx ? 'bg-[#f0a144] text-black shadow' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
+                  key={item.globalIndex}
+                  type="button"
+                  onClick={() => {
+                    setSelectedBoardFilter(item.globalIndex);
+                    setPan({ x: 0, y: 0 });
+                  }}
+                  className={`px-2 py-1 rounded-lg text-[9px] sm:text-[10px] font-mono font-bold uppercase transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer ${selectedBoardFilter === item.globalIndex ? 'bg-[#f0a144] text-black shadow font-black' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
+                  title={`${item.group.displayName} (${item.group.config.width}×${item.group.config.height} mm)`}
                 >
-                  Plancha {bIdx + 1 < 10 ? '0' : ''}{bIdx + 1}
+                  <span 
+                    className="w-2 h-2 rounded-full border border-black/40 shrink-0 shadow-xs" 
+                    style={{ backgroundColor: item.group.materialColor }} 
+                  />
+                  <span>Plancha {item.boardNumber < 10 ? '0' : ''}{item.boardNumber}</span>
                 </button>
               ))}
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => setShowViewOptions(value => !value)}
-                className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium transition-colors ${showViewOptions ? 'border-[#f0a144]/50 bg-[#f0a144]/10 text-[#f7b766]' : 'border-white/10 bg-white/[0.03] text-[#9aa4af] hover:text-white'}`}
-                aria-expanded={showViewOptions}
-              >
-                <Eye className="w-3.5 h-3.5" />
-                Vista
-              </button>
-
-              <div className="flex items-center gap-1 bg-white/[0.03] border border-white/10 p-0.5 rounded-lg">
-                <button onClick={() => setZoom(z => Math.min(z + 0.25, 3))} className="p-1 rounded text-[#c7ced6] hover:bg-white/10 hover:text-white transition-colors" title="Aumentar zoom">
-                  <ZoomIn className="w-3.5 h-3.5" />
-                </button>
-                <button onClick={() => setZoom(z => Math.max(z - 0.25, 0.4))} className="p-1 rounded text-[#c7ced6] hover:bg-white/10 hover:text-white transition-colors" title="Reducir zoom">
-                  <ZoomOut className="w-3.5 h-3.5" />
-                </button>
-                <button onClick={() => setZoom(1)} className="p-1 rounded text-[#c7ced6] hover:bg-white/10 hover:text-white transition-colors" title="Restablecer zoom">
-                  <Maximize2 className="w-3.5 h-3.5" />
-                </button>
+            {/* Material & Edgeband Summary Badges */}
+            <div className="hidden xl:flex items-center gap-3 text-[9px] font-mono bg-[#222222] border border-[#333333] px-3 py-1 rounded-lg text-[#aaa]">
+              <div className="flex items-center gap-1.5">
+                <BarChart3 className="w-3.5 h-3.5 text-[#f0a144]" />
+                <span className="text-white font-bold uppercase">
+                  {activeBoardItem ? activeBoardItem.group.displayName : (boardGroups.length === 1 ? boardGroups[0].displayName : `${flatBoardsList.length} PLANCHAS`)}
+                </span>
+                <span className="text-[#666]">|</span>
+                <span>
+                  {activeBoardItem ? `${activeBoardItem.group.config.width}×${activeBoardItem.group.config.height}mm` : `${sheetConfig.width}×${sheetConfig.height}mm`}
+                </span>
+                <span className="text-[#666]">|</span>
+                <span>Efic: <strong className="text-emerald-400">
+                  {activeBoardItem ? activeBoardItem.board.stats.efficiency.toFixed(1) : totalStats.efficiency.toFixed(1)}%
+                </strong></span>
               </div>
+              <div className="h-3 w-px bg-[#444]"></div>
+              <div className="flex items-center gap-2">
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 bg-red-600 rounded-sm inline-block"></span>
+                  C.Grueso: <strong className="text-white">{edgebandingTotals.thick}m</strong>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 bg-blue-600 rounded-sm inline-block"></span>
+                  C.Delgado: <strong className="text-white">{edgebandingTotals.thin}m</strong>
+                </span>
+              </div>
+            </div>
+
+            {/* Zoom Control Buttons */}
+            <div className="flex items-center gap-1 bg-[#222222] border border-[#333333] p-0.5 rounded-lg shrink-0 select-none">
+              <button 
+                type="button"
+                onClick={() => setZoom(z => Math.max(z - 0.15, 0.25))} 
+                className="p-1 rounded text-[#aaa] hover:text-white hover:bg-[#333333] transition-colors" 
+                title="Reducir Zoom (Lupa -)"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <button 
+                type="button"
+                onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} 
+                className="px-1.5 py-0.5 rounded text-white font-mono text-[10px] font-bold hover:bg-[#333333] transition-colors" 
+                title="Restablecer Zoom (100%)"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+              <button 
+                type="button"
+                onClick={() => setZoom(z => Math.min(z + 0.15, 4.0))} 
+                className="p-1 rounded text-[#aaa] hover:text-white hover:bg-[#333333] transition-colors" 
+                title="Aumentar Zoom (Lupa +)"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+              <button 
+                type="button"
+                onClick={handleFitToScreen} 
+                className="p-1 rounded text-[#f0a144] hover:text-white hover:bg-[#333333] transition-colors" 
+                title="Ajustar y maximizar en pantalla"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+              </button>
             </div>
           </div>
 
-          {showViewOptions && (
-          <div className="bg-[#15181c] border-b border-white/10 px-2 sm:px-4 py-2 flex items-center justify-between gap-4 overflow-x-auto no-scrollbar shrink-0 z-10">
-            <div className="flex items-center gap-3 sm:gap-4 shrink-0 text-[12px] font-mono text-[#cccccc] select-none">
-              <div className="flex items-center bg-white/[0.03] border border-white/10 p-0.5 rounded-lg shrink-0">
-                <button
-                  onClick={() => setLayoutMode('vertical')}
-                  className={`p-1.5 rounded transition-colors ${layoutMode === 'vertical' ? 'bg-[#f0a144] text-black' : 'text-[#89939f] hover:text-white'}`}
-                  title="Planchas en vertical"
-                >
-                  <Rows className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  onClick={() => setLayoutMode('grid')}
-                  className={`p-1.5 rounded transition-colors ${layoutMode === 'grid' ? 'bg-[#f0a144] text-black' : 'text-[#89939f] hover:text-white'}`}
-                  title="Planchas en cuadrícula"
-                >
-                  <Grid className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  onClick={() => setLayoutMode('horizontal')}
-                  className={`p-1.5 rounded transition-colors ${layoutMode === 'horizontal' ? 'bg-[#f0a144] text-black' : 'text-[#89939f] hover:text-white'}`}
-                  title="Planchas en horizontal"
-                >
-                  <LayoutList className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
+          {/* BANDEJA SUPERIOR 2: OPCIONES DE CAPAS CAD Y ACCIONES */}
+          <div className="bg-[#181818] border-b border-[#2d2d2d] px-2 sm:px-4 py-1.5 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar shrink-0 shadow-sm z-10">
+            <div className="flex items-center gap-3 sm:gap-4 shrink-0 text-[10px] font-mono text-[#cccccc] select-none">
+              
               {/* Checkbox: Show Piece Dimensions */}
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
+              <label className="flex items-center gap-1 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={showPieceDims} 
                   onChange={(e) => setShowPieceDims(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Tamaño Piezas</span>
+                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Piezas</span>
               </label>
 
               {/* Checkbox: Show Waste / Offcut Dimensions */}
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
+              <label className="flex items-center gap-1 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={showWasteDims} 
                   onChange={(e) => setShowWasteDims(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Tamaño Desechos</span>
+                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Desechos</span>
               </label>
 
               {/* Checkbox: Show Piece Labels/Names */}
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
+              <label className="flex items-center gap-1 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={showPieceNames} 
                   onChange={(e) => setShowPieceNames(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Etiqueta / Nombre</span>
+                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Nombres</span>
               </label>
 
               {/* Checkbox: Show Edgeband Lines */}
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
+              <label className="flex items-center gap-1 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={showEdgebandLines} 
                   onChange={(e) => setShowEdgebandLines(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="flex items-center gap-1 text-[12px] sm:text-[12px] font-sans font-medium">
-                  <span className="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
-                  Bandas de Bordes
+                <span className="flex items-center gap-1 text-[9px] sm:text-[10px] font-sans font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block"></span>
+                  Cantos
                 </span>
               </label>
 
               {/* Checkbox: Show Cut Sequence Index */}
-              <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
+              <label className="flex items-center gap-1 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={showCutIndex} 
                   onChange={(e) => setShowCutIndex(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Índice Corte</span>
+                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Índice</span>
               </label>
 
               {/* Checkbox: Show Sheet Outer Dimension Lines */}
-              <label className="hidden md:flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors">
+              <label className="hidden md:flex items-center gap-1 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={showSheetRulers} 
                   onChange={(e) => setShowSheetRulers(e.target.checked)}
                   className="w-3.5 h-3.5 rounded accent-[#f0a144] bg-[#222222] border-[#444444] cursor-pointer"
                 />
-                <span className="text-[12px] sm:text-[12px] font-sans font-medium">Cotas Plancha</span>
+                <span className="text-[9px] sm:text-[10px] font-sans font-medium">Cotas</span>
               </label>
+
+              {/* Button: Calibrar Letras y Números en el plano 2D */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSettings(true);
+                  setActiveSettingsTab('typography');
+                }}
+                className={`flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded border text-[9px] sm:text-[10px] font-bold uppercase transition-all shrink-0 cursor-pointer ${
+                  showSettings && activeSettingsTab === 'typography' 
+                    ? 'bg-[#f0a144] text-black border-[#f0a144] shadow-md font-black' 
+                    : 'bg-[#222222] hover:bg-[#2e2e2e] text-[#f0a144] border-[#3f3f3f] hover:border-[#f0a144]/60'
+                }`}
+                title="Ajustes de calibración: tamaño y estilo de letras y números en 2D"
+              >
+                <Type className="w-3.5 h-3.5 text-current" />
+                <span className="hidden xs:inline">Calibrar</span>
+                <span className={`text-[8.5px] font-mono px-1 py-0.2 rounded font-bold ${
+                  showSettings && activeSettingsTab === 'typography' ? 'bg-black text-[#f0a144]' : 'bg-[#f0a144] text-black'
+                }`}>
+                  {Math.round(cadTextConfig.nameScale * 100)}%
+                </span>
+              </button>
+
+              {/* Checkbox / Button: Toggle Color y Textura Real */}
+              <button
+                type="button"
+                onClick={() => setUseRealMaterialColors(v => !v)}
+                className={`flex items-center gap-1 px-2 py-1 rounded border text-[9px] sm:text-[10px] font-bold uppercase transition-all shrink-0 cursor-pointer ${
+                  useRealMaterialColors 
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/60 shadow-xs' 
+                    : 'bg-[#222222] hover:bg-[#2e2e2e] text-[#aaa] border-[#3f3f3f]'
+                }`}
+                title="Mostrar color y textura real de materiales en el plano 2D (Melaminas, MDF, Vidrios)"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden xs:inline">Color</span>
+                <span className={`text-[8px] font-mono px-1 py-0.2 rounded font-bold ${
+                  useRealMaterialColors ? 'bg-[#f0a144] text-black' : 'bg-black/60 text-[#888]'
+                }`}>
+                  {useRealMaterialColors ? 'ON' : 'CAD'}
+                </span>
+              </button>
+
+              {/* Button: Consolidado y Cálculo de Materiales */}
+              <button
+                type="button"
+                onClick={() => setShowMaterialSummaryModal(true)}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-[#202020] hover:bg-[#2a2a2a] text-white hover:text-[#f0a144] border border-[#3f3f3f] hover:border-[#f0a144]/60 text-[9px] sm:text-[10px] font-bold uppercase transition-colors shrink-0 cursor-pointer"
+                title="Ver consolidado de cálculo de materiales (Planchas de Melamina, MDF, Vidrio y Tapacantos)"
+              >
+                <Layers className="w-3.5 h-3.5 text-[#f0a144]" />
+                <span className="hidden xs:inline">Cálculo</span>
+              </button>
 
             </div>
 
@@ -646,18 +1621,35 @@ export default function CutPlanViewer({
             <div className="flex items-center gap-1.5 shrink-0">
               {/* Espejo (Mirror Layout Button) */}
               <button
+                type="button"
                 onClick={() => setIsMirrored(!isMirrored)}
-                className={`flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase border transition-colors ${isMirrored ? 'bg-[#f0a144] text-black border-[#f0a144]' : 'bg-[#222222] text-[#aaa] border-[#333] hover:text-white'}`}
+                className={`flex items-center gap-1 px-2 py-1 rounded text-[9px] font-bold uppercase border transition-colors cursor-pointer ${isMirrored ? 'bg-[#f0a144] text-black border-[#f0a144]' : 'bg-[#222222] text-[#aaa] border-[#333] hover:text-white'}`}
                 title="Voltear horizontalmente (Modo Espejo)"
               >
                 <FlipHorizontal className="w-3.5 h-3.5" />
                 <span className="hidden xs:inline">Espejo</span>
               </button>
 
+              {/* Botón Rotación en Barra CAD */}
+              <button
+                type="button"
+                onClick={handleToggleGlobalRotation}
+                className={`flex items-center gap-1 px-2 py-1 rounded text-[9px] font-bold uppercase border transition-colors cursor-pointer ${
+                  allPiecesRotatable
+                    ? 'bg-blue-600 text-white border-blue-400 shadow-sm'
+                    : 'bg-[#222222] text-[#aaa] border-[#333] hover:text-white'
+                }`}
+                title={allPiecesRotatable ? "Rotación: PERMITIDA (90°). Clic para bloquear" : "Rotación: BLOQUEADA (Fija). Clic para permitir rotación"}
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+                <span className="hidden xs:inline">Rotación: {allPiecesRotatable ? 'SÍ' : 'NO'}</span>
+              </button>
+
               {/* Theme Toggle (Plano CAD Blanco vs Modo Oscuro) */}
               <button
+                type="button"
                 onClick={() => setCadTheme(isLightCAD ? 'dark' : 'light')}
-                className="flex items-center gap-1 px-2 py-1 rounded text-[12px] font-bold uppercase bg-[#222222] border border-[#333333] text-[#aaaaaa] hover:text-white transition-colors"
+                className="flex items-center gap-1 px-2 py-1 rounded text-[9px] font-bold uppercase bg-[#222222] border border-[#333333] text-[#aaaaaa] hover:text-white transition-colors cursor-pointer"
                 title={isLightCAD ? "Cambiar a Modo Oscuro" : "Cambiar a Plano Blanco CAD (Software Tradicional)"}
               >
                 {isLightCAD ? (
@@ -672,302 +1664,394 @@ export default function CutPlanViewer({
                   </>
                 )}
               </button>
+
+              {/* Exportar PDF Didáctico para Carpintería */}
+              <button
+                type="button"
+                onClick={() => setShowPdfExport(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[9px] font-extrabold uppercase bg-[#f0a144] hover:bg-[#ffb055] text-black border border-[#f0a144] transition-all shadow-md active:scale-95 cursor-pointer"
+                title="Exportar plano de corte en PDF didáctico para taller"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span className="hidden xs:inline">Exportar PDF</span>
+              </button>
             </div>
           </div>
-          )}
 
-          {/* Top Panel: Boards Graph Canvas (100% LIMPIO SIN BANDEJAS FLOTANTES SOBRE EL PLANO) */}
-          <div className={`flex-1 overflow-auto p-2 sm:p-6 relative touch-pan-x touch-pan-y ${mobileTab === 'list' ? 'hidden sm:block' : 'block'}`} ref={containerRef}>
-            {/* Boards Layout Container */}
-            <div className="flex flex-col gap-8 sm:gap-12 w-full pb-12">
-              {boardGroups.map((group, gIdx) => {
-                let currentGlobalBoardOffset = 0;
-                for (let prevG = 0; prevG < gIdx; prevG++) {
-                  currentGlobalBoardOffset += boardGroups[prevG].boards.length;
+          {/* Canvas Area with Wheel Zoom and Pan Drag */}
+          <div 
+            className={`flex-1 overflow-hidden p-2 sm:p-6 relative select-none touch-none ${isPanning ? 'cursor-grabbing' : 'cursor-grab'}`} 
+            ref={containerRef}
+            onMouseDown={handleCanvasMouseDown}
+            onMouseMove={handleCanvasMouseMove}
+            onMouseUp={handleCanvasMouseUp}
+            onMouseLeave={handleCanvasMouseUp}
+          >
+            {/* Minimalist Pan & Zoom Indicator */}
+            <div className="absolute top-3 left-3 z-20 pointer-events-none bg-[#181818]/90 backdrop-blur border border-[#333333] px-2.5 py-1 rounded-md text-[9px] font-mono text-[#888] hidden sm:flex items-center gap-2 shadow-lg">
+              <span className="text-[#f0a144]">Zoom:</span>
+              <span className="text-white font-bold">{Math.round(zoom * 100)}%</span>
+              <span className="text-[#555]">•</span>
+              <span>{wheelMode === 'scroll' ? '🖱️ Rueda: Desplazar (Ctrl+Rueda: Zoom)' : '🔍 Rueda: Zoom directo'}</span>
+              <span className="text-[#555]">•</span>
+              <span>👆 Táctil: 2 dedos zoom</span>
+            </div>
+
+            {/* Dynamic scroll hint toast when scrolling with wheel */}
+            {showZoomHint && wheelMode === 'scroll' && (
+              <div className="absolute top-11 left-3 z-20 pointer-events-none bg-black/85 backdrop-blur border border-[#444] px-2.5 py-1 rounded-md text-[9px] font-mono text-white animate-in fade-in duration-150 flex items-center gap-1.5 shadow-xl">
+                <span className="text-[#f0a144]">💡</span>
+                <span>Desplazando plano. Mantén <strong>Ctrl + Rueda</strong> para zoom con lupa</span>
+              </div>
+            )}
+
+            {/* Floating Zoom & Pan Navigation HUD */}
+            <div className="absolute bottom-4 right-4 z-30 flex items-center gap-1 bg-[#181818]/95 backdrop-blur-md border border-[#383838] p-1.5 rounded-xl shadow-2xl text-white select-none">
+              {/* Alejar / Lupa - */}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.25, Number((z - 0.15).toFixed(2)))); }}
+                className="p-1.5 hover:bg-[#2d2d2d] active:bg-[#383838] rounded-lg text-[#aaa] hover:text-white transition-colors"
+                title="Alejar plano (Lupa -)"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
+
+              {/* Porcentaje actual y restablecer al 100% */}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setZoom(1); setPan({ x: 0, y: 0 }); }}
+                className="px-2 py-1 hover:bg-[#2d2d2d] rounded-lg text-white font-mono text-[11px] font-bold transition-colors"
+                title="Restablecer Zoom al 100% y centrar plano"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+
+              {/* Acercar / Lupa + */}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(4.0, Number((z + 0.15).toFixed(2)))); }}
+                className="p-1.5 hover:bg-[#2d2d2d] active:bg-[#383838] rounded-lg text-[#aaa] hover:text-white transition-colors"
+                title="Acercar plano (Lupa +)"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+
+              <div className="w-px h-4 bg-[#383838] mx-0.5" />
+
+              {/* Ajustar a la pantalla */}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); handleFitToScreen(); }}
+                className="px-2 py-1 hover:bg-[#2d2d2d] rounded-lg text-[#f0a144] hover:text-white transition-colors flex items-center gap-1 text-[10px] font-bold"
+                title="Ajustar y maximizar plancha en pantalla"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Ajustar</span>
+              </button>
+
+              <div className="w-px h-4 bg-[#383838] mx-0.5" />
+
+              {/* Selector de modo rueda ratón */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setWheelMode(m => m === 'scroll' ? 'zoom' : 'scroll');
+                }}
+                className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold flex items-center gap-1 transition-all ${
+                  wheelMode === 'scroll'
+                    ? 'bg-[#252525] text-emerald-400 border border-emerald-500/30 hover:bg-[#2d2d2d]'
+                    : 'bg-[#f0a144] text-black hover:bg-[#ffb055]'
+                }`}
+                title={
+                  wheelMode === 'scroll'
+                    ? 'Modo Rueda: Desplazamiento natural (Usa Ctrl+Rueda o pulsa aquí para Zoom directo)'
+                    : 'Modo Rueda: Zoom directo (pulsa aquí para volver a Desplazamiento)'
                 }
+              >
+                <span>{wheelMode === 'scroll' ? '↕ Rueda: Desplazar' : '🔍 Rueda: Zoom'}</span>
+              </button>
+            </div>
+
+            {/* Boards Layout Container with Pan Transform */}
+            <div 
+              className="flex flex-col gap-6 sm:gap-8 w-full pb-16 transition-transform duration-75 origin-top-left items-center"
+              style={{
+                transform: `translate(${pan.x}px, ${pan.y}px)`
+              }}
+            >
+              {boardsToRender.map((item) => {
+                const { group, board, boardNumber } = item;
+                const bWidth = group.config.width;
+                const bHeight = group.config.height;
+                const svgW = bWidth * viewScale * zoom;
+                const svgH = bHeight * viewScale * zoom;
 
                 return (
-                  <div key={group.key} className="flex flex-col gap-4 sm:gap-6">
-                    <div className="flex items-center justify-between gap-4 bg-[#1a1e23] px-3 sm:px-4 py-2.5 rounded-lg border border-white/[0.08]">
-                      <div className="flex items-center gap-3">
-                        <span
-                          className="w-4 h-4 rounded border border-white/20 shrink-0"
-                          style={{ backgroundColor: group.color || '#e7e4dc' }}
-                        />
-                        <div className="flex flex-col">
-                          <span className="text-[12px] font-semibold text-white">
-                            {group.material} · {group.thickness} mm
+                  <div key={`${group.groupKey}-${boardNumber}`} className="flex flex-col items-center max-w-full">
+                    {/* Sheet Card Frame */}
+                    <div className={`p-2.5 sm:p-3.5 rounded-xl border shadow-2xl transition-all w-fit max-w-full ${isLightCAD ? 'bg-[#f4f4f5] border-[#d4d4d8] text-black' : 'bg-[#181818] border-[#333333] text-white'}`}>
+                      
+                      {/* Sheet Title Bar (Clean, Non-wrapping, High Legibility) */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-[#383838]/40 mb-2 text-[10.5px] font-mono">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="bg-[#f0a144] text-black px-2 py-0.5 rounded font-black text-[10px]">
+                            PLANCHA {boardNumber}
                           </span>
-                          <span className="text-[11px] text-[#7f8995] font-mono">
-                            {group.config.width} × {group.config.height} mm · {group.boards.length} {group.boards.length === 1 ? 'plancha' : 'planchas'} · {group.stats.efficiency.toFixed(1)}%
-                          </span>
-                        </div>
-                      </div>
+                                  <div 
+                                    className="w-3 h-3 rounded-full border border-black/40 shrink-0 shadow-xs" 
+                                    style={{ backgroundColor: group.materialColor }}
+                                    title={group.displayName}
+                                  />
+                                  <span className="text-[#f0a144] font-black">{group.code}</span>
+                                  <span className={`font-bold uppercase ${isLightCAD ? "text-black" : "text-white"}`}>
+                                    {group.displayName}
+                                  </span>
+                                  <span className="text-[#888] font-semibold">({bWidth}×{bHeight} mm)</span>
+                                </div>
 
-                      <div className="hidden md:flex items-center gap-3 text-[11px] font-mono text-[#89939f]">
-                        <span className="flex items-center gap-1">
-                          <span className="w-2 h-2 bg-blue-500 rounded-full inline-block"></span>
-                          Delgado <strong className="text-[#d9e0e7]">{group.thinEdgeM.toFixed(2)} m</strong>
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <span className="w-2 h-2 bg-red-500 rounded-full inline-block"></span>
-                          Grueso <strong className="text-[#d9e0e7]">{group.thickEdgeM.toFixed(2)} m</strong>
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Boards Render Grid/Flex */}
-                    <div className={
-                      layoutMode === 'vertical'
-                        ? "flex flex-col gap-8 sm:gap-12 items-center sm:items-start w-full"
-                        : layoutMode === 'grid'
-                          ? "grid grid-cols-1 xl:grid-cols-2 gap-8 w-full"
-                          : "flex items-start gap-8 w-max overflow-x-auto pb-4"
-                    }>
-                      {group.boards.map((board, idx) => {
-                        const globalIndex = currentGlobalBoardOffset + idx;
-                        if (selectedBoardFilter !== 'all' && selectedBoardFilter !== globalIndex) {
-                          return null;
-                        }
-
-                        const boardWidth = group.config.width;
-                        const boardHeight = group.config.height;
-
-                        // Calculate SVG outer margin offset for rulers
-                        const rulerOffset = showSheetRulers ? 24 : 0;
-                        const svgWidth = (boardWidth * currentScale) + rulerOffset;
-                        const svgHeight = (boardHeight * currentScale) + rulerOffset;
-
-                        return (
-                          <div 
-                            key={idx} 
-                            className="flex flex-col gap-2 animate-in fade-in duration-300 w-full max-w-full"
-                          >
-                            {/* Board Header Bar */}
-                            <div className="flex items-center justify-between border-b border-[#333333] pb-1.5 px-1">
-                              <div className="flex items-center gap-2">
-                                <span className="px-2 py-0.5 rounded-md bg-[#f0a144] text-black font-black text-[12px] sm:text-[12px] uppercase tracking-wider shadow">
-                                  Plancha {globalIndex + 1 < 10 ? '0' : ''}{globalIndex + 1}
-                                </span>
-                                <span className="text-[12px] sm:text-[12px] font-mono font-bold text-white">
-                                  {boardWidth} x {boardHeight} mm
-                                </span>
+                                <div className="flex items-center gap-2 text-[10px] shrink-0">
+                                  <span>Piezas: <strong className={`font-bold ${isLightCAD ? "text-black" : "text-white"}`}>{board.rects.length}</strong></span>
+                                  <span className="text-[#555]">|</span>
+                                  <span>Aprov: <strong className="text-emerald-400 font-bold">{board.stats.efficiency.toFixed(1)}%</strong></span>
+                                  <span className="text-[#555]">|</span>
+                                  <span>Desecho: <strong className="text-rose-400 font-bold">{(100 - board.stats.efficiency).toFixed(1)}%</strong></span>
+                                </div>
                               </div>
 
-                              <div className="flex items-center gap-2 sm:gap-4 text-[11px] sm:text-[12px] font-mono">
-                                <span className="text-[#a0a0a0]">
-                                  Piezas: <strong className="text-white">{board.rects.length}</strong>
-                                </span>
-                                <span className="text-[#a0a0a0] border-l border-[#444444] pl-2">
-                                  Aprovechamiento: <strong className={board.stats.efficiency > 85 ? 'text-emerald-400' : board.stats.efficiency > 70 ? 'text-[#f0a144]' : 'text-rose-400'}>{board.stats.efficiency.toFixed(1)}%</strong>
-                                </span>
-                                <span className="text-[#a0a0a0] border-l border-[#444444] pl-2 hidden xs:inline">
-                                  Desecho: <strong className="text-rose-300">{(100 - board.stats.efficiency).toFixed(1)}%</strong>
-                                </span>
-                              </div>
-                            </div>
-                            
-                            {/* Board SVG Container - Styled to match Cutting Optimization Pro */}
-                            <div className={`overflow-auto max-w-full border-2 border-[#111111] rounded-lg p-2 sm:p-4 flex flex-col items-center touch-pan-x touch-pan-y shadow-2xl transition-colors ${isLightCAD ? 'bg-[#d8d8d8]' : 'bg-[#181818]'}`}>
-                              
-                              <div 
-                                className={`relative shadow-2xl overflow-hidden shrink-0 border-2 ${isLightCAD ? 'border-black bg-white' : 'border-[#222222] bg-[#262626]'}`}
-                                style={{ 
-                                  width: svgWidth, 
-                                  height: svgHeight,
-                                  transform: isMirrored ? 'scaleX(-1)' : 'none'
-                                }}
-                              >
-                                <svg 
-                                  width={svgWidth} 
-                                  height={svgHeight} 
-                                  className="block transform-origin-top-left select-none"
-                                >
-                                  <defs>
-                                    {/* Diagonal Hatch Pattern for Waste Areas (Desechos) */}
-                                    <pattern 
-                                      id={`diagonalHatch-${globalIndex}`} 
-                                      patternUnits="userSpaceOnUse" 
-                                      width="12" 
-                                      height="12" 
-                                      patternTransform="rotate(45)"
-                                    >
-                                      <line 
-                                        x1="0" 
-                                        y1="0" 
-                                        x2="0" 
-                                        y2="12" 
-                                        stroke={isLightCAD ? "#888888" : "#555555"} 
-                                        strokeWidth="1.5" 
-                                        opacity="0.85" 
-                                      />
-                                    </pattern>
-                                  </defs>
+                              {/* SVG Canvas Container with CAD Rulers */}
+                              <div className="relative flex flex-col items-center">
+                                {/* Top Outer Dimension */}
+                                {showSheetRulers && (
+                                  <div className="w-full flex justify-between items-center px-1 pb-1 font-mono text-[10px] text-[#888]">
+                                    <span className="text-[9px]">0</span>
+                                    <span className="font-bold text-[#f0a144]">← {bWidth} mm →</span>
+                                    <span className="text-[9px]">{bWidth}</span>
+                                  </div>
+                                )}
 
-                                  {/* RULERS / SHEET COTAS */}
-                                  {showSheetRulers && (
-                                    <g className="sheet-rulers font-mono font-bold text-[12px]">
-                                      {/* Top Dimension (Width) */}
-                                      <line 
-                                        x1={rulerOffset} 
-                                        y1={12} 
-                                        x2={rulerOffset + (boardWidth * currentScale)} 
-                                        y2={12} 
-                                        stroke={isLightCAD ? "#000000" : "#aaaaaa"} 
-                                        strokeWidth="1" 
-                                      />
-                                      <line x1={rulerOffset} y1={6} x2={rulerOffset} y2={18} stroke={isLightCAD ? "#000" : "#aaa"} strokeWidth="1" />
-                                      <line x1={rulerOffset + (boardWidth * currentScale)} y1={6} x2={rulerOffset + (boardWidth * currentScale)} y2={18} stroke={isLightCAD ? "#000" : "#aaa"} strokeWidth="1" />
-                                      <text 
-                                        x={rulerOffset + (boardWidth * currentScale) / 2} 
-                                        y={10} 
-                                        textAnchor="middle" 
-                                        fill={isLightCAD ? "#000000" : "#ffffff"} 
-                                        fontSize={10} 
-                                        fontWeight="900"
+                                <div className="relative">
+                                  <svg
+                                    width={svgW}
+                                    height={svgH}
+                                    viewBox={`0 0 ${bWidth} ${bHeight}`}
+                                    className={`border shadow-inner transition-colors duration-150 ${isLightCAD ? 'bg-[#ffffff] border-[#333333]' : 'bg-[#222222] border-[#444444]'}`}
+                                    style={{
+                                      transform: isMirrored ? 'scaleX(-1)' : 'none',
+                                      transformOrigin: 'center center',
+                                    }}
+                                  >
+                                    <defs>
+                                      {/* Procedural Wood Grain Overlay */}
+                                      <pattern 
+                                        id={`wood-grain-pattern-${boardNumber}`} 
+                                        width="120" 
+                                        height="600" 
+                                        patternUnits="userSpaceOnUse"
                                       >
-                                        {boardWidth}
-                                      </text>
+                                        <line x1="0" y1="0" x2="0" y2="600" stroke="rgba(0,0,0,0.07)" strokeWidth="1" />
+                                        <line x1="25" y1="0" x2="25" y2="600" stroke="rgba(0,0,0,0.05)" strokeWidth="0.8" />
+                                        <line x1="55" y1="0" x2="55" y2="600" stroke="rgba(255,255,255,0.08)" strokeWidth="1.2" />
+                                        <line x1="85" y1="0" x2="85" y2="600" stroke="rgba(0,0,0,0.06)" strokeWidth="0.9" />
+                                        <line x1="110" y1="0" x2="110" y2="600" stroke="rgba(255,255,255,0.05)" strokeWidth="0.7" />
+                                        <path d="M 15 100 Q 25 220 15 340 T 15 580" fill="none" stroke="rgba(0,0,0,0.04)" strokeWidth="1.5" />
+                                      </pattern>
 
-                                      {/* Left Dimension (Height) */}
-                                      <line 
-                                        x1={12} 
-                                        y1={rulerOffset} 
-                                        x2={12} 
-                                        y2={rulerOffset + (boardHeight * currentScale)} 
-                                        stroke={isLightCAD ? "#000000" : "#aaaaaa"} 
-                                        strokeWidth="1" 
-                                      />
-                                      <line x1={6} y1={rulerOffset} x2={18} y2={rulerOffset} stroke={isLightCAD ? "#000" : "#aaa"} strokeWidth="1" />
-                                      <line x1={6} y1={rulerOffset + (boardHeight * currentScale)} x2={18} y2={rulerOffset + (boardHeight * currentScale)} stroke={isLightCAD ? "#000" : "#aaa"} strokeWidth="1" />
-                                      <text 
-                                        x={10} 
-                                        y={rulerOffset + (boardHeight * currentScale) / 2} 
-                                        textAnchor="middle" 
-                                        transform={`rotate(-90 10 ${rulerOffset + (boardHeight * currentScale) / 2})`}
-                                        fill={isLightCAD ? "#000000" : "#ffffff"} 
-                                        fontSize={10} 
-                                        fontWeight="900"
+                                      {/* Glass Sheen Gradient */}
+                                      <linearGradient id={`glass-sheen-${boardNumber}`} x1="0" y1="0" x2="1" y2="1">
+                                        <stop offset="0%" stopColor="#bae6fd" stopOpacity="0.45" />
+                                        <stop offset="50%" stopColor="#e0f2fe" stopOpacity="0.2" />
+                                        <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.4" />
+                                      </linearGradient>
+
+                                      {/* MDF Fiber Texture */}
+                                      <pattern 
+                                        id={`mdf-fiber-${boardNumber}`} 
+                                        width="24" 
+                                        height="24" 
+                                        patternUnits="userSpaceOnUse"
                                       >
-                                        {boardHeight}
-                                      </text>
-                                    </g>
-                                  )}
+                                        <circle cx="4" cy="4" r="0.9" fill="rgba(80,50,20,0.14)" />
+                                        <circle cx="16" cy="14" r="1.0" fill="rgba(60,30,10,0.12)" />
+                                        <circle cx="8" cy="18" r="0.7" fill="rgba(255,255,255,0.08)" />
+                                      </pattern>
+                                    </defs>
 
-                                  {/* Main Board Base Canvas */}
-                                  <g transform={`translate(${rulerOffset}, ${rulerOffset})`}>
-                                    
-                                    {/* Main Sheet Outline */}
+                                    {/* Perimeter Sheet Outline */}
                                     <rect
                                       x={0}
                                       y={0}
-                                      width={boardWidth * currentScale}
-                                      height={boardHeight * currentScale}
-                                      fill={isLightCAD ? "#ffffff" : "#222222"}
-                                      stroke={isLightCAD ? "#000000" : "#444444"}
+                                      width={bWidth}
+                                      height={bHeight}
+                                      fill="none"
+                                      stroke={isLightCAD ? '#000000' : '#444444'}
                                       strokeWidth={2}
                                     />
 
-                                    {/* 1. RENDER WASTE AREAS (DESECHOS CON TRAMADO DIAGONAL) */}
-                                    {board.wasteRects.map((w, wIdx) => {
-                                      const wx = w.x * currentScale;
-                                      const wy = w.y * currentScale;
-                                      const ww = w.w * currentScale;
-                                      const wh = w.h * currentScale;
+                                    {/* Waste Rectangles (Sobrantes / Retazos) */}
+                                    {board.wasteRects.map((waste, wIdx) => (
+                                      <g key={`waste-${wIdx}`} className="pointer-events-none">
+                                        <rect
+                                          x={waste.x}
+                                          y={waste.y}
+                                          width={waste.w}
+                                          height={waste.h}
+                                          fill={waste.isMargin ? (isLightCAD ? '#e4e4e7' : '#1a1a1a') : (isLightCAD ? '#fee2e2' : '#331a1a')}
+                                          stroke={isLightCAD ? '#d4d4d8' : '#333333'}
+                                          strokeWidth={1}
+                                          strokeDasharray={waste.isMargin ? '2,2' : undefined}
+                                        />
+                                        {/* Waste Dimensions Label */}
+                                        {showWasteDims && !waste.isMargin && waste.w > 30 && waste.h > 20 && (
+                                          <text
+                                            x={waste.x + waste.w / 2}
+                                            y={waste.y + waste.h / 2}
+                                            textAnchor="middle"
+                                            dominantBaseline="middle"
+                                            fill={isLightCAD ? '#dc2626' : '#f87171'}
+                                            fontSize={Math.max(24, Math.min(48, waste.w * 0.12, waste.h * 0.18)) * cadTextConfig.dimScale}
+                                            className="font-mono font-bold select-none opacity-80"
+                                          >
+                                            {Math.round(waste.w)}×{Math.round(waste.h)}
+                                          </text>
+                                        )}
+                                      </g>
+                                    ))}
 
-                                      if (ww < 1 || wh < 1) return null;
-
-                                      return (
-                                        <g key={`waste-${wIdx}`}>
-                                          {/* Hatch Fill */}
-                                          <rect
-                                            x={wx}
-                                            y={wy}
-                                            width={ww}
-                                            height={wh}
-                                            fill={`url(#diagonalHatch-${globalIndex})`}
-                                            stroke={isLightCAD ? "#94a3b8" : "#444444"}
-                                            strokeWidth={1}
-                                            strokeDasharray={w.isMargin ? "3 3" : undefined}
-                                          />
-
-                                          {/* Waste Dimensions Label */}
-                                          {showWasteDims && ww > 32 && wh > 18 && (
-                                            <text
-                                              x={wx + ww / 2}
-                                              y={wy + wh / 2}
-                                              textAnchor="middle"
-                                              dominantBaseline="middle"
-                                              fill={isLightCAD ? "#334155" : "#a1a1aa"}
-                                              fontSize={Math.max(7, Math.min(11, ww * 0.18, wh * 0.3))}
-                                              fontWeight="bold"
-                                              fontFamily="monospace"
-                                              className="pointer-events-none select-none"
-                                            >
-                                              {Math.round(w.w)}
-                                            </text>
-                                          )}
-                                        </g>
-                                      );
-                                    })}
-
-                                    {/* 2. RENDER USABLE CUT PIECES */}
+                                    {/* Placed Pieces Rectangles */}
                                     {board.rects.map((rect, rIdx) => {
                                       const isSelected = selectedPieceIds.includes(rect.id);
-                                      
-                                      const rectX = rect.x * currentScale;
-                                      const rectY = rect.y * currentScale;
-                                      const rectW = rect.w * currentScale;
-                                      const rectH = rect.h * currentScale;
-
+                                      const isHovered = hoveredPieceId === rect.id;
+                                      const rectX = rect.x;
+                                      const rectY = rect.y;
+                                      const rectW = rect.w;
+                                      const rectH = rect.h;
                                       const cx = rectX + rectW / 2;
                                       const cy = rectY + rectH / 2;
 
-                                      // Font sizing calculations
-                                      const nameFontSize = Math.max(8, Math.min(15, rectW * 0.22, rectH * 0.35));
-                                      const dimFontSize = Math.max(7, Math.min(12, rectW * 0.18, rectH * 0.25));
+                                      // Font sizes in SVG mm units - tuned for crisp legibility with calibration
+                                      const baseNameFontSize = Math.max(34, Math.min(74, rectW * 0.12, rectH * 0.18));
+                                      const baseDimFontSize = Math.max(28, Math.min(52, rectW * 0.09, rectH * 0.14));
 
-                                      const showName = showPieceNames && rectW > 16 && rectH > 12;
-                                      const showDims = showPieceDims && rectW > 28 && rectH > 20;
+                                      const nameFontSize = baseNameFontSize * cadTextConfig.nameScale;
+                                      const dimFontSize = baseDimFontSize * cadTextConfig.dimScale;
 
-                                      // Determine cantos for 4 sides considering rotation
-                                      // Normal: top=L1, bottom=L2, left=A1, right=A2
-                                      // Rotated: top=A1, bottom=A2, left=L1, right=L2
+                                      const showName = showPieceNames && rectW > Math.max(28, 50 / cadTextConfig.nameScale) && rectH > Math.max(22, 36 / cadTextConfig.nameScale);
+                                      const showDims = showPieceDims && rectW > Math.max(36, 58 / cadTextConfig.dimScale) && rectH > Math.max(28, 42 / cadTextConfig.dimScale);
+
+                                      const pieceNameText = cadTextConfig.letterCase === 'uppercase' ? rect.name.toUpperCase() : rect.name;
+
+                                      const nameFontFamilyClass = 
+                                        cadTextConfig.fontFamily === 'mono' ? 'font-mono' :
+                                        cadTextConfig.fontFamily === 'condensed' ? 'font-sans tracking-tighter' :
+                                        'font-sans tracking-tight';
+
+                                      const nameFontWeight = 
+                                        cadTextConfig.fontWeight === 'normal' ? '500' :
+                                        cadTextConfig.fontWeight === 'bold' ? '700' :
+                                        '900';
+
+                                      // Material color resolution and contrast-aware text
+                                      const isDarkMat = rect.isDark ?? (!isLightCAD);
+                                      const defaultCADFill = isLightCAD ? '#ffffff' : '#383838';
+                                      const realMatFill = rect.color || defaultCADFill;
+
+                                      const pieceFillColor = isSelected 
+                                        ? (isLightCAD ? '#fef3c7' : '#f0a144') 
+                                        : isHovered
+                                          ? (isLightCAD ? '#dbeafe' : '#1e3a8a')
+                                          : (useRealMaterialColors ? realMatFill : defaultCADFill);
+
+                                      const pieceStrokeColor = isSelected 
+                                        ? '#d97706' 
+                                        : isHovered
+                                          ? '#2563eb'
+                                          : (rect.isGlass ? '#0284c7' : (isLightCAD ? '#000000' : '#111111'));
+
+                                      const effectiveTextColor = isSelected 
+                                        ? '#000000' 
+                                        : isHovered 
+                                          ? '#ffffff'
+                                          : (useRealMaterialColors ? (isDarkMat ? '#ffffff' : '#111111') : (isLightCAD ? '#000000' : '#ffffff'));
+
+                                      const dimColor = 
+                                        cadTextConfig.dimStyle === 'amber' ? '#f0a144' :
+                                        cadTextConfig.dimStyle === 'blue' ? '#2563eb' :
+                                        cadTextConfig.dimStyle === 'red' ? '#dc2626' :
+                                        (isSelected ? '#000000' : isHovered ? '#ffffff' : (useRealMaterialColors ? (isDarkMat ? '#ffffff' : '#111111') : (isLightCAD ? '#000000' : '#ffffff')));
+
+                                      const dimFontFamily = cadTextConfig.fontFamily === 'mono' ? 'monospace' : 'sans-serif';
+                                      const dimFontWeight = cadTextConfig.fontWeight === 'normal' ? 'normal' : 'bold';
+
                                       const topCanto = !rect.rotated ? rect.cantos.largo1 : rect.cantos.ancho1;
                                       const bottomCanto = !rect.rotated ? rect.cantos.largo2 : rect.cantos.ancho2;
                                       const leftCanto = !rect.rotated ? rect.cantos.ancho1 : rect.cantos.largo1;
                                       const rightCanto = !rect.rotated ? rect.cantos.ancho2 : rect.cantos.largo2;
 
                                       return (
-                                        <g 
-                                          key={`${rect.id}-${rIdx}`} 
+                                        <g
+                                          key={`${rect.id}-${rIdx}`}
+                                          data-piece-rect="true"
                                           onClick={(e) => { e.stopPropagation(); toggleSelection(rect.id, e.shiftKey); }}
+                                          onMouseEnter={() => setHoveredPieceId(rect.id)}
+                                          onMouseLeave={() => setHoveredPieceId(null)}
                                           className="group/rect transition-all duration-150 pointer-events-auto cursor-pointer"
                                         >
-                                          {/* Main Piece Background Rectangle */}
+                                          {/* Main Piece Background */}
                                           <rect
                                             x={rectX}
                                             y={rectY}
                                             width={rectW}
                                             height={rectH}
-                                            fill={
-                                              isSelected 
-                                                ? (isLightCAD ? '#fff3e0' : '#f0a144') 
-                                                : (isLightCAD ? '#ffffff' : '#383838')
-                                            }
-                                            stroke={
-                                              isSelected 
-                                                ? '#d97706' 
-                                                : (isLightCAD ? '#000000' : '#111111')
-                                            }
-                                            strokeWidth={isSelected ? 2.5 : 1.5}
+                                            fill={pieceFillColor}
+                                            stroke={pieceStrokeColor}
+                                            strokeWidth={isSelected || isHovered ? 2.5 : 1.5}
                                             className={isSelected ? '' : (isLightCAD ? 'hover:fill-[#fffbeb]' : 'hover:fill-[#4a4a4a]')}
                                           />
 
-                                          {/* BANDAS DE BORDES (CANTOS HIGHLIGHT LINES - RED/BLUE BORDERS LIKE CUTTING OPTIMIZATION PRO) */}
+                                          {/* Material Texture Overlays (Wood grain / Glass sheen / MDF fiber) */}
+                                          {useRealMaterialColors && !isSelected && !isHovered && (
+                                            <>
+                                              {(rect.isWood || rect.hasGrain) && (
+                                                <rect
+                                                  x={rectX}
+                                                  y={rectY}
+                                                  width={rectW}
+                                                  height={rectH}
+                                                  fill={`url(#wood-grain-pattern-${boardNumber})`}
+                                                  pointerEvents="none"
+                                                  opacity={0.65}
+                                                />
+                                              )}
+                                              {rect.isGlass && (
+                                                <rect
+                                                  x={rectX}
+                                                  y={rectY}
+                                                  width={rectW}
+                                                  height={rectH}
+                                                  fill={`url(#glass-sheen-${boardNumber})`}
+                                                  pointerEvents="none"
+                                                  opacity={0.55}
+                                                />
+                                              )}
+                                              {rect.substrate === 'mdf' && (
+                                                <rect
+                                                  x={rectX}
+                                                  y={rectY}
+                                                  width={rectW}
+                                                  height={rectH}
+                                                  fill={`url(#mdf-fiber-${boardNumber})`}
+                                                  pointerEvents="none"
+                                                  opacity={0.5}
+                                                />
+                                              )}
+                                            </>
+                                          )}
+
+                                          {/* Edgeband Lines (Cantos: Red=Thick, Blue=Thin) */}
                                           {showEdgebandLines && (
                                             <g className="edgeband-lines pointer-events-none">
-                                              {/* Top Edge */}
                                               {topCanto !== 'Ninguno' && (
                                                 <line 
                                                   x1={rectX} 
@@ -975,10 +2059,9 @@ export default function CutPlanViewer({
                                                   x2={rectX + rectW} 
                                                   y2={rectY} 
                                                   stroke={topCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={topCanto === 'Canto Grueso' ? 3.5 : 2.5} 
+                                                  strokeWidth={topCanto === 'Canto Grueso' ? 7 : 4.5} 
                                                 />
                                               )}
-                                              {/* Bottom Edge */}
                                               {bottomCanto !== 'Ninguno' && (
                                                 <line 
                                                   x1={rectX} 
@@ -986,10 +2069,9 @@ export default function CutPlanViewer({
                                                   x2={rectX + rectW} 
                                                   y2={rectY + rectH} 
                                                   stroke={bottomCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={bottomCanto === 'Canto Grueso' ? 3.5 : 2.5} 
+                                                  strokeWidth={bottomCanto === 'Canto Grueso' ? 7 : 4.5} 
                                                 />
                                               )}
-                                              {/* Left Edge */}
                                               {leftCanto !== 'Ninguno' && (
                                                 <line 
                                                   x1={rectX} 
@@ -997,10 +2079,9 @@ export default function CutPlanViewer({
                                                   x2={rectX} 
                                                   y2={rectY + rectH} 
                                                   stroke={leftCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={leftCanto === 'Canto Grueso' ? 3.5 : 2.5} 
+                                                  strokeWidth={leftCanto === 'Canto Grueso' ? 7 : 4.5} 
                                                 />
                                               )}
-                                              {/* Right Edge */}
                                               {rightCanto !== 'Ninguno' && (
                                                 <line 
                                                   x1={rectX + rectW} 
@@ -1008,657 +2089,690 @@ export default function CutPlanViewer({
                                                   x2={rectX + rectW} 
                                                   y2={rectY + rectH} 
                                                   stroke={rightCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={rightCanto === 'Canto Grueso' ? 3.5 : 2.5} 
+                                                  strokeWidth={rightCanto === 'Canto Grueso' ? 7 : 4.5} 
                                                 />
                                               )}
                                             </g>
                                           )}
 
-                                          {/* PIECE EDGE DIMENSIONS (TEXT ALONG EDGES LIKE SOFTWARE SCREENSHOT) */}
+                                          {/* Piece Dimensions - Large, Bold & High Contrast with Calibration */}
                                           {showDims && (
-                                            <g className="piece-edge-dimensions pointer-events-none select-none font-mono font-black">
-                                              {/* Top Horizontal Dimension */}
+                                            <g className="piece-edge-dimensions pointer-events-none select-none">
+                                              {/* Top Horizontal Dimension (Largo) */}
+                                              {rectW > 50 && (
+                                                <g>
+                                                  {cadTextConfig.showBadgeBg && (
+                                                    <rect
+                                                      x={cx - (String(Math.round(rect.w)).length * dimFontSize * 0.36)}
+                                                      y={rectY + Math.max(22, dimFontSize * 0.95) - (dimFontSize * 0.78)}
+                                                      width={String(Math.round(rect.w)).length * dimFontSize * 0.72}
+                                                      height={dimFontSize * 1.05}
+                                                      rx={3}
+                                                      fill={isLightCAD ? 'rgba(255,255,255,0.9)' : 'rgba(25,25,25,0.9)'}
+                                                      stroke={isLightCAD ? '#cccccc' : '#555555'}
+                                                      strokeWidth={0.8}
+                                                    />
+                                                  )}
+                                                  <text
+                                                    x={cx}
+                                                    y={rectY + Math.max(22, dimFontSize * 0.95)}
+                                                    textAnchor="middle"
+                                                    fill={dimColor}
+                                                    fontSize={dimFontSize}
+                                                    fontWeight={dimFontWeight}
+                                                    fontFamily={dimFontFamily}
+                                                  >
+                                                    {Math.round(rect.w)}
+                                                  </text>
+                                                </g>
+                                              )}
+
+                                              {/* Left Vertical Dimension (Ancho) - positioned cleanly to avoid colliding with center name */}
+                                              {rectH > 50 && rectW > 90 && (
+                                                <g>
+                                                  {cadTextConfig.showBadgeBg && (
+                                                    <rect
+                                                      x={rectX + Math.max(14, dimFontSize * 0.55) - (dimFontSize * 0.52)}
+                                                      y={cy - (String(Math.round(rect.h)).length * dimFontSize * 0.36)}
+                                                      width={dimFontSize * 1.05}
+                                                      height={String(Math.round(rect.h)).length * dimFontSize * 0.72}
+                                                      rx={3}
+                                                      fill={isLightCAD ? 'rgba(255,255,255,0.9)' : 'rgba(25,25,25,0.9)'}
+                                                      stroke={isLightCAD ? '#cccccc' : '#555555'}
+                                                      strokeWidth={0.8}
+                                                    />
+                                                  )}
+                                                  <text
+                                                    x={rectX + Math.max(14, dimFontSize * 0.55)}
+                                                    y={cy}
+                                                    textAnchor="middle"
+                                                    dominantBaseline="middle"
+                                                    transform={`rotate(-90 ${rectX + Math.max(14, dimFontSize * 0.55)} ${cy})`}
+                                                    fill={dimColor}
+                                                    fontSize={dimFontSize}
+                                                    fontWeight={dimFontWeight}
+                                                    fontFamily={dimFontFamily}
+                                                  >
+                                                    {Math.round(rect.h)}
+                                                  </text>
+                                                </g>
+                                              )}
+                                            </g>
+                                          )}
+
+                                          {/* Piece Name / Label - Large & Prominent with Calibration */}
+                                          {showName && (
+                                            <g className="piece-name-label pointer-events-none select-none">
+                                              {cadTextConfig.showBadgeBg && (
+                                                <rect
+                                                  x={cx - (pieceNameText.length * nameFontSize * 0.32)}
+                                                  y={(showDims ? cy + (dimFontSize * 0.35) : cy) - (nameFontSize * 0.6)}
+                                                  width={pieceNameText.length * nameFontSize * 0.64}
+                                                  height={nameFontSize * 1.2}
+                                                  rx={4}
+                                                  fill={isLightCAD ? 'rgba(255,255,255,0.9)' : 'rgba(25,25,25,0.9)'}
+                                                  stroke={isLightCAD ? '#cccccc' : '#555555'}
+                                                  strokeWidth={1}
+                                                />
+                                              )}
                                               <text
                                                 x={cx}
-                                                y={rectY + Math.min(12, rectH * 0.3)}
+                                                y={showDims ? cy + (dimFontSize * 0.35) : cy}
                                                 textAnchor="middle"
-                                                fill={isLightCAD ? '#000000' : '#ffffff'}
-                                                fontSize={dimFontSize}
+                                                dominantBaseline="middle"
+                                                fill={effectiveTextColor}
+                                                fontSize={nameFontSize}
+                                                fontWeight={nameFontWeight}
+                                                className={`${nameFontFamilyClass} select-none`}
                                               >
-                                                {Math.round(rect.w)}
+                                                {pieceNameText}
                                               </text>
 
-                                              {/* Left Vertical Dimension */}
-                                              {rectH > 30 && (
+                                              {/* Substrate / Material Type Tag under piece name when space permits */}
+                                              {rectW > 70 && rectH > 52 && (
                                                 <text
-                                                  x={rectX + Math.min(10, rectW * 0.3)}
-                                                  y={cy}
+                                                  x={cx}
+                                                  y={(showDims ? cy + (dimFontSize * 0.35) : cy) + (nameFontSize * 0.68)}
                                                   textAnchor="middle"
-                                                  transform={`rotate(-90 ${rectX + Math.min(10, rectW * 0.3)} ${cy})`}
-                                                  fill={isLightCAD ? '#000000' : '#ffffff'}
-                                                  fontSize={dimFontSize}
+                                                  dominantBaseline="middle"
+                                                  fill={effectiveTextColor}
+                                                  fontSize={Math.max(9, Math.min(18, nameFontSize * 0.44))}
+                                                  fontWeight="bold"
+                                                  className="font-mono opacity-65 uppercase tracking-wider select-none"
                                                 >
-                                                  {Math.round(rect.h)}
+                                                  {rect.substrateLabel || rect.materialName || 'MELAMINA'}
                                                 </text>
                                               )}
                                             </g>
                                           )}
 
-                                          {/* PIECE CENTER LABEL / NAME / ETIQUETA */}
-                                          {showName && (
-                                            <text
-                                              x={cx}
-                                              y={showDims ? cy + 2 : cy}
-                                              textAnchor="middle"
-                                              dominantBaseline="middle"
-                                              fill={isSelected ? '#000000' : (isLightCAD ? '#000000' : '#ffffff')}
-                                              fontSize={nameFontSize}
-                                              className="font-black pointer-events-none select-none uppercase tracking-tight"
-                                            >
-                                              {rect.name}
-                                            </text>
+                                          {/* Grain Orientation Arrow indicator for workshop cuts */}
+                                          {rect.veta && rectW > 50 && rectH > 35 && (
+                                            <g className="pointer-events-none select-none opacity-80">
+                                              <text
+                                                x={rectX + rectW - Math.max(16, dimFontSize * 0.65)}
+                                                y={rectY + Math.max(16, dimFontSize * 0.65)}
+                                                textAnchor="middle"
+                                                dominantBaseline="middle"
+                                                fill={dimColor}
+                                                fontSize={Math.max(12, dimFontSize * 0.55)}
+                                                fontWeight="bold"
+                                                className="font-mono"
+                                              >
+                                                <title>{rect.rotated ? "Veta horizontal (pieza girada 90°)" : "Veta vertical (sentido veta estándar)"}</title>
+                                                {rect.rotated ? '↔' : '↕'}
+                                              </text>
+                                            </g>
                                           )}
 
-                                          {/* CUT SEQUENCE INDEX BADGE */}
+                                          {/* Cut Index Badge - Scaled and Clear */}
                                           {showCutIndex && (
-                                            <g className="pointer-events-none">
-                                              <rect
-                                                x={rectX + 2}
-                                                y={rectY + 2}
-                                                width={14}
-                                                height={14}
-                                                rx={3}
+                                            <g className="pointer-events-none select-none">
+                                              <circle
+                                                cx={rectX + Math.max(24, dimFontSize * 0.8)}
+                                                cy={rectY + Math.max(24, dimFontSize * 0.8)}
+                                                r={Math.max(16, dimFontSize * 0.55)}
                                                 fill="#f0a144"
+                                                stroke="#000000"
+                                                strokeWidth={1.5}
                                               />
                                               <text
-                                                x={rectX + 9}
-                                                y={rectY + 10}
+                                                x={rectX + Math.max(24, dimFontSize * 0.8)}
+                                                y={rectY + Math.max(24, dimFontSize * 0.8) + (dimFontSize * 0.2)}
                                                 textAnchor="middle"
                                                 dominantBaseline="middle"
                                                 fill="#000000"
-                                                fontSize={8}
-                                                fontWeight="900"
-                                                fontFamily="monospace"
+                                                fontSize={Math.max(14, dimFontSize * 0.5)}
+                                                fontWeight="bold"
+                                                className="font-mono"
                                               >
                                                 {rect.cutIndex}
                                               </text>
                                             </g>
                                           )}
-
-                                          {/* ROTATION INDICATOR */}
-                                          {rect.rotated && rectW > 18 && (
-                                            <RotateCw 
-                                              x={rectX + rectW - Math.min(12, rectW * 0.25)} 
-                                              y={rectY + 2} 
-                                              size={Math.min(10, rectW * 0.2)}
-                                              className={`${isSelected ? 'text-black' : (isLightCAD ? 'text-[#444]' : 'text-[#a0a0a0]')} opacity-75 pointer-events-none`} 
-                                            />
-                                          )}
                                         </g>
                                       );
                                     })}
+                                  </svg>
+                                </div>
 
-                                  </g>
-                                </svg>
+                                {/* Bottom Outer Dimension Ruler */}
+                                {showSheetRulers && (
+                                  <div className="w-full flex justify-between items-center px-1 pt-1 font-mono text-[10px] text-[#888]">
+                                    <span className="text-[9px]">Alto: {bHeight} mm</span>
+                                    <span className="font-bold text-[#888]">Área: {((bWidth * bHeight) / 1000000).toFixed(2)} m²</span>
+                                    <span className="text-[9px]">Kerf: {group.config.kerf} mm</span>
+                                  </div>
+                                )}
                               </div>
 
-                              {/* Footer Description under 2D Board (Exact match to Cutting Optimization Pro footer) */}
-                              <div className="mt-2 text-[12px] font-mono font-bold text-[#444444] dark:text-[#a0a0a0] flex items-center justify-center gap-2 bg-white dark:bg-[#222222] px-3 py-1 rounded border border-[#cccccc] dark:border-[#333333] shadow-sm select-none">
-                                <span>Material = <strong className="text-black dark:text-white">{group.material} · {group.thickness} mm</strong></span>
-                                <span>;</span>
-                                <span>Etiqueta = <strong className="text-black dark:text-white">MELAMINA</strong></span>
-                                <span>;</span>
-                                <span>Cantidad = <strong className="text-black dark:text-white">1</strong></span>
-                                <span>;</span>
-                                <span>Aprovechamiento = <strong className="text-emerald-600 dark:text-emerald-400">{board.stats.efficiency.toFixed(1)}%</strong></span>
+                              {/* Bottom Sheet Information Specs */}
+                              <div className="mt-2 pt-1.5 border-t border-[#383838]/40 flex flex-wrap items-center justify-between text-[9.5px] font-mono text-[#888] gap-2">
+                                <div className="flex items-center gap-3">
+                                  <span>Plancha: <strong className={isLightCAD ? 'text-black' : 'text-white'}>{boardNumber} de {flatBoardsList.length}</strong></span>
+                                  <span>•</span>
+                                  <span>Material: <strong className={isLightCAD ? 'text-black' : 'text-white'}>{group.displayName}</strong></span>
+                                  <span>•</span>
+                                  <span>Formato: <strong className={isLightCAD ? 'text-black' : 'text-white'}>{bWidth}×{bHeight} mm</strong></span>
+                                </div>
+                                <div>
+                                  Aprovechamiento: <strong className="text-emerald-500 font-bold">{board.stats.efficiency.toFixed(1)}%</strong>
+                                </div>
                               </div>
 
                             </div>
                           </div>
                         );
                       })}
-                    </div>
-                  </div>
-                );
-              })}
             </div>
-          </div>
-
-          {/* Bottom Panel: Resizable & Collapsible List of Pieces (REQ #2) */}
-          <div 
-            style={{ height: isListCollapsed ? '44px' : `${listPanelHeight}px` }}
-            className={`border-t-2 border-[#1a1a1a] bg-[#222222] flex flex-col shrink-0 ${isDraggingList ? '' : 'transition-all duration-200'} shadow-2xl z-20 w-full max-w-full overflow-hidden box-border relative`}
-          >
-             {/* Barra de Arrastre Vertical (Draggable Split Handle) */}
-             <div 
-               onMouseDown={handleListDragStart}
-               onTouchStart={handleListDragStart}
-               className="w-full h-2 bg-[#181818] hover:bg-[#f0a144] active:bg-[#f0a144] cursor-ns-resize flex items-center justify-center transition-colors group shrink-0"
-               title="Arrastrar arriba/abajo para ajustar el tamaño de las ventanas"
-             >
-               <GripHorizontal className="w-6 h-3 text-[#555] group-hover:text-black transition-colors" />
-             </div>
-
-             {/* List Header & Controls */}
-             <div 
-               className="h-10 border-b border-[#333333] bg-[#1a1a1a] flex items-center justify-between px-2 sm:px-4 shrink-0 shadow-sm select-none w-full max-w-full overflow-hidden gap-1 box-border"
-             >
-               <div className="flex items-center gap-1.5 sm:gap-3 min-w-0 overflow-hidden">
-                 <span className="text-[12px] sm:text-[13px] font-black text-white uppercase tracking-widest flex items-center gap-1 truncate">
-                   <Layers3 className="w-3.5 h-3.5 text-[#f0a144] shrink-0" />
-                   Listado de Piezas
-                   <span className="bg-[#333333] text-[#f0a144] px-1.5 py-0.5 rounded text-[11px] sm:text-[12px] font-mono ml-0.5 shrink-0">
-                     {groupedPieces.length} únicas ({pieces.reduce((a, b) => a + b.cantidad, 0)} total)
-                   </span>
-                 </span>
-
-                 {onConsolidatePieces && (
-                   <button 
-                     onClick={(e) => { e.stopPropagation(); onConsolidatePieces(); }}
-                     className="hidden xs:flex items-center gap-1 px-2 py-0.5 bg-[#333333] hover:bg-[#444444] text-white text-[11px] font-bold uppercase rounded border border-[#555555] transition-colors shrink-0"
-                     title="Agrupar piezas idénticas automáticamente"
-                   >
-                     Agrupar
-                   </button>
-                 )}
-               </div>
-
-               <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-                 {/* Search Input */}
-                 {(!isListCollapsed || mobileTab === 'list') && (
-                   <div className="relative flex items-center bg-[#2a2a2a] border border-[#444444] rounded-lg px-1.5 py-0.5 shrink-0">
-                     <Search className="w-3 h-3 text-[#888888] mr-1 shrink-0" />
-                     <input 
-                       type="text"
-                       value={pieceSearch}
-                       onChange={(e) => setPieceSearch(e.target.value)}
-                       placeholder="Buscar..."
-                       className="bg-transparent border-none outline-none text-[12px] text-white placeholder-[#777777] w-14 xs:w-20 sm:w-28 py-0.5 min-w-0"
-                     />
-                   </div>
-                 )}
-
-                 {/* View Mode Switcher (Tabla vs Tarjetas) */}
-                 {(!isListCollapsed || mobileTab === 'list') && (
-                   <div className="flex items-center bg-[#2a2a2a] border border-[#444444] p-0.5 rounded-lg">
-                     <button 
-                       onClick={() => setPieceViewMode('table')}
-                       className={`p-1 rounded text-[12px] font-bold transition-colors ${pieceViewMode === 'table' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
-                       title="Modo Tabla de Datos"
-                     >
-                       <Table className="w-3.5 h-3.5" />
-                     </button>
-                     <button 
-                       onClick={() => setPieceViewMode('cards')}
-                       className={`p-1 rounded text-[12px] font-bold transition-colors ${pieceViewMode === 'cards' ? 'bg-[#f0a144] text-black' : 'text-[#888888] hover:text-white'}`}
-                       title="Modo Tarjetas"
-                     >
-                       <Grid className="w-3.5 h-3.5" />
-                     </button>
-                   </div>
-                 )}
-
-                 {/* CONTROLES DE TAMAÑO / BAJAR VENTANA (REQ #2) */}
-                 <div className="flex items-center bg-[#2a2a2a] border border-[#444444] p-0.5 rounded-lg gap-0.5">
-                   {/* Botón Bajar / Minimizar Ventana */}
-                   <button
-                     onClick={() => setIsListCollapsed(!isListCollapsed)}
-                     className={`flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-colors ${isListCollapsed ? 'bg-[#f0a144] text-black shadow font-black' : 'text-[#aaa] hover:text-white hover:bg-[#333]'}`}
-                     title={isListCollapsed ? "Ampliar Ventana" : "Bajar Ventana para ver más Plano de Corte"}
-                   >
-                     <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isListCollapsed ? 'rotate-180' : ''}`} />
-                     <span className="hidden md:inline">{isListCollapsed ? 'Subir' : 'Bajar Ventana'}</span>
-                   </button>
-
-                   {/* Botón Acomodar (Media 260px) */}
-                   <button
-                     onClick={() => { setIsListCollapsed(false); setListPanelHeight(260); }}
-                     className={`hidden sm:flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-colors ${!isListCollapsed && listPanelHeight === 260 ? 'bg-[#333333] text-[#f0a144]' : 'text-[#888888] hover:text-white'}`}
-                     title="Acomodar a tamaño mediano (260px)"
-                   >
-                     <Rows className="w-3.5 h-3.5" />
-                     <span className="hidden lg:inline">Acomodar</span>
-                   </button>
-
-                   {/* Botón Ampliar (Grande 480px) */}
-                   <button
-                     onClick={() => { setIsListCollapsed(false); setListPanelHeight(480); }}
-                     className={`hidden sm:flex items-center gap-1 px-1.5 py-1 rounded text-[12px] font-bold uppercase transition-colors ${!isListCollapsed && listPanelHeight >= 450 ? 'bg-[#333333] text-[#f0a144]' : 'text-[#888888] hover:text-white'}`}
-                     title="Ampliar ventana listado de piezas (480px)"
-                   >
-                     <ChevronUp className="w-3.5 h-3.5" />
-                     <span className="hidden lg:inline">Ampliar</span>
-                   </button>
-                 </div>
-               </div>
-             </div>
-             
-             {/* List Content Area */}
-             <div className="flex-1 overflow-auto p-2 sm:p-3 bg-[#242424]" ref={listRef}>
-               {pieceViewMode === 'table' ? (
-                 /* TABLA DE PIEZAS HIGH-DENSITY */
-                 <div className="w-full overflow-x-auto">
-                   <table className="w-full text-left border-collapse font-sans text-[12px] min-w-[700px]">
-                     <thead>
-                       <tr className="border-b border-[#383838] bg-[#1a1a1a] text-[#a0a0a0] font-mono text-[12px] uppercase tracking-wider sticky top-0 z-10">
-                         <th className="py-2 px-2.5">Cant.</th>
-                         <th className="py-2 px-2.5">Nombre</th>
-                         <th className="py-2 px-2.5">Largo X (mm)</th>
-                         <th className="py-2 px-2.5">Ancho Y (mm)</th>
-                         <th className="py-2 px-2.5">Espesor</th>
-                         <th className="py-2 px-2.5">Cantos (L1 - L2 - A1 - A2)</th>
-                         <th className="py-2 px-2.5 text-center">Rotar (Veta)</th>
-                          <th className="py-2 px-2.5">Material</th>
-                       </tr>
-                     </thead>
-                     <tbody className="divide-y divide-[#333333]">
-                       {filteredGroupedPieces.map((group, idx) => {
-                         const { representative: piece, totalQuantity, ids, key } = group;
-                         const isSelected = ids.some(id => selectedPieceIds.includes(id));
-
-                         const handleUpdate = (updates: Partial<Piece>) => {
-                           ids.forEach(id => updatePiece(id, updates));
-                         };
-
-                         return (
-                           <tr 
-                             key={key}
-                             data-group-key={key}
-                             onClick={(e) => {
-                               if (e.shiftKey) {
-                                 ids.forEach(id => toggleSelection(id, true));
-                               } else {
-                                 toggleSelection(ids[0], false);
-                               }
-                             }}
-                             className={`cursor-pointer transition-colors ${isSelected ? 'bg-[#f0a144]/20 border-l-4 border-l-[#f0a144]' : 'hover:bg-[#2d2d2d]'}`}
-                           >
-                             <td className="py-1.5 px-2.5">
-                               <input 
-                                 type="number"
-                                 min="1"
-                                 value={totalQuantity}
-                                 onChange={(e) => {
-                                   const val = parseInt(e.target.value) || 1;
-                                   handleQuantityUpdate(group, val);
-                                 }}
-                                 onClick={(e) => e.stopPropagation()}
-                                 className="w-12 bg-[#1a1a1a] border border-[#444444] rounded text-center text-white font-mono font-bold py-0.5 focus:border-[#f0a144] outline-none"
-                                 title="Cantidad total de piezas"
-                               />
-                             </td>
-
-                             <td className="py-1.5 px-2.5">
-                               <input 
-                                 type="text"
-                                 value={piece.name}
-                                 onChange={(e) => handleUpdate({ name: e.target.value })}
-                                 onClick={(e) => e.stopPropagation()}
-                                 className="bg-transparent border-b border-transparent focus:border-[#f0a144] outline-none text-white font-bold uppercase w-full truncate"
-                                 placeholder={`Pieza ${idx + 1}`}
-                               />
-                             </td>
-
-                             <td className="py-1.5 px-2.5">
-                               <input 
-                                 type="number"
-                                 value={piece.largo === 0 ? '' : Math.round(piece.largo)}
-                                 onChange={(e) => handleUpdate({ largo: parseFloat(e.target.value) || 0 })}
-                                 onClick={(e) => e.stopPropagation()}
-                                 className="w-16 bg-[#1a1a1a] border border-[#444444] rounded px-1.5 py-0.5 text-white font-mono font-bold text-center focus:border-[#f0a144] outline-none"
-                               />
-                             </td>
-
-                             <td className="py-1.5 px-2.5">
-                               <input 
-                                 type="number"
-                                 value={piece.ancho === 0 ? '' : Math.round(piece.ancho)}
-                                 onChange={(e) => handleUpdate({ ancho: parseFloat(e.target.value) || 0 })}
-                                 onClick={(e) => e.stopPropagation()}
-                                 className="w-16 bg-[#1a1a1a] border border-[#444444] rounded px-1.5 py-0.5 text-white font-mono font-bold text-center focus:border-[#f0a144] outline-none"
-                               />
-                             </td>
-
-                             <td className="py-1.5 px-2.5">
-                               <span className="px-2 py-0.5 rounded bg-[#1a1a1a] border border-[#444444] text-[#f0a144] font-mono font-bold">
-                                 {piece.espesor || 18} mm
-                               </span>
-                             </td>
-
-                             {/* Cantos Breakdown Badges */}
-                             <td className="py-1.5 px-2.5">
-                               <div className="flex items-center gap-1">
-                                 {(['largo1', 'largo2', 'ancho1', 'ancho2'] as const).map((edgeKey) => {
-                                   const val = piece.cantos ? piece.cantos[edgeKey] : 'Ninguno';
-                                   const isThick = val === 'Canto Grueso';
-                                   const isThin = val === 'Canto Delgado';
-
-                                   const toggleCanto = () => {
-                                     const nextVal = val === 'Ninguno' ? 'Canto Delgado' : val === 'Canto Delgado' ? 'Canto Grueso' : 'Ninguno';
-                                     handleUpdate({
-                                       cantos: { ...piece.cantos, [edgeKey]: nextVal }
-                                     });
-                                   };
-
-                                   return (
-                                     <button 
-                                       key={edgeKey} 
-                                       onClick={(e) => { e.stopPropagation(); toggleCanto(); }}
-                                       className={`px-1.5 py-0.5 rounded text-[11px] font-mono font-bold uppercase transition-all ${
-                                         isThick ? 'bg-red-950/90 border border-red-500 text-red-300' :
-                                         isThin ? 'bg-blue-950/90 border border-blue-500 text-blue-300' :
-                                         'bg-[#1a1a1a] border border-[#383838] text-[#777777] hover:text-white'
-                                       }`}
-                                       title={`${edgeKey.toUpperCase()}: Click para cambiar (${val})`}
-                                     >
-                                       {edgeKey.charAt(0).toUpperCase()}{edgeKey.slice(-1)}:{isThick ? 'G' : isThin ? 'D' : '-'}
-                                     </button>
-                                   );
-                                 })}
-                               </div>
-                             </td>
-
-                             {/* Rotate Control for Table Row */}
-                             <td className="py-1.5 px-2.5 text-center" onClick={(e) => e.stopPropagation()}>
-                               <div className="flex items-center justify-center gap-1.5">
-                                 {totalQuantity > 1 && (
-                                   <div className="flex items-center gap-1 bg-[#1a1a1a] border border-[#444444] rounded px-1.5 py-0.5">
-                                     <span className="text-[11px] text-[#888] font-mono uppercase">Cant:</span>
-                                     <input 
-                                       type="number"
-                                       min="1"
-                                       max={totalQuantity}
-                                       value={rotateQtyMap[key] ?? totalQuantity}
-                                       onChange={(e) => {
-                                         const val = Math.min(totalQuantity, Math.max(1, parseInt(e.target.value) || 1));
-                                         setRotateQtyMap(prev => ({ ...prev, [key]: val }));
-                                       }}
-                                       className="w-8 bg-transparent text-center text-white font-mono text-[12px] font-bold outline-none"
-                                       title="Cantidad de piezas a rotar"
-                                     />
-                                     <span className="text-[11px] text-[#666] font-mono">/{totalQuantity}</span>
-                                   </div>
-                                 )}
-                                 <button
-                                   onClick={() => handleRotateGroup(group, rotateQtyMap[key] ?? totalQuantity)}
-                                   className="px-2 py-0.5 rounded bg-[#333333] hover:bg-[#f0a144] hover:text-black text-white text-[12px] font-bold font-mono uppercase border border-[#555555] transition-colors flex items-center gap-1 shadow-sm shrink-0"
-                                   title={`Rotar ${rotateQtyMap[key] && rotateQtyMap[key] < totalQuantity ? `${rotateQtyMap[key]} piezas` : 'todas las piezas'}`}
-                                 >
-                                   <RotateCw className="w-3 h-3 text-[#f0a144]" />
-                                   <span>Rotar</span>
-                                 </button>
-                               </div>
-                             </td>
-
-                             <td className="py-1.5 px-2.5 text-[#aaaaaa] font-mono uppercase truncate max-w-[120px]">
-                               {piece.material || 'Melamina'}
-                             </td>
-                           </tr>
-                         );
-                       })}
-                     </tbody>
-                   </table>
-                 </div>
-               ) : (
-                 /* MODO TARJETAS RESPONSIVE PARA MÓVIL */
-                 <div className="grid grid-cols-1 xs:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 w-full max-w-full">
-                   {filteredGroupedPieces.map((group, idx) => {
-                     const { representative: piece, totalQuantity, ids, key } = group;
-                     const isSelected = ids.some(id => selectedPieceIds.includes(id));
-                     
-                     const handleUpdate = (updates: Partial<Piece>) => {
-                       ids.forEach(id => updatePiece(id, updates));
-                     };
-
-                     return (
-                       <div 
-                         key={key} 
-                         data-group-key={key}
-                         onClick={(e) => {
-                           if (e.shiftKey) {
-                             ids.forEach(id => toggleSelection(id, true));
-                           } else {
-                             toggleSelection(ids[0], false);
-                           }
-                         }}
-                         className={`bg-[#1a1a1a] border rounded-xl p-2 sm:p-2.5 flex flex-col gap-1.5 sm:gap-2 cursor-pointer transition-all w-full max-w-full overflow-hidden ${isSelected ? 'border-[#f0a144] shadow-[0_0_15px_rgba(240,161,68,0.25)] ring-1 ring-[#f0a144]' : 'border-[#333333] hover:border-[#555555]'}`}
-                       >
-                         {/* Header: Quantity & Name */}
-                         <div className="flex items-center justify-between gap-1 w-full min-w-0">
-                             <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                                <div className="bg-[#333333] px-1.5 py-0.5 rounded text-[12px] font-mono text-[#f0a144] font-black shrink-0">
-                                  {totalQuantity}x
-                                </div>
-                                <input 
-                                  type="text"
-                                  value={piece.name}
-                                  onChange={(e) => handleUpdate({ name: e.target.value })}
-                                  onClick={(e) => e.stopPropagation()}
-                                  className="bg-transparent border-none outline-none text-[13px] font-black text-white focus:text-[#f0a144] min-w-0 w-full uppercase truncate"
-                                  placeholder={`Pieza ${idx+1}`}
-                                />
-                             </div>
-                             <div className="flex items-center gap-1 shrink-0">
-                                <div className="bg-[#222222] border border-[#444444] px-1.5 py-0.5 rounded text-[12px] font-bold text-[#aaaaaa] font-mono">
-                                  {piece.espesor || 18}mm
-                                </div>
-                             </div>
-                         </div>
-
-                         {/* Dimensions: Largo X and Ancho Y */}
-                         <div className="flex gap-1.5 bg-[#222222] p-1.5 rounded-lg border border-[#333333] w-full min-w-0">
-                           <div className="flex-1 min-w-0 flex flex-col">
-                             <span className="text-[11px] text-[#888888] font-bold uppercase tracking-wider mb-0.5">LARGO (X)</span>
-                             <input 
-                               type="number"
-                               value={piece.largo === 0 ? '' : Math.round(piece.largo)}
-                               onChange={(e) => handleUpdate({ largo: parseFloat(e.target.value) || 0 })}
-                               onClick={(e) => e.stopPropagation()}
-                               className="w-full min-w-0 bg-[#1a1a1a] border border-[#444444] rounded text-[12px] sm:text-[13px] text-white font-mono font-bold px-1 py-1 text-center focus:border-[#f0a144] outline-none"
-                             />
-                           </div>
-
-                           <div className="flex-1 min-w-0 flex flex-col">
-                             <span className="text-[11px] text-[#888888] font-bold uppercase tracking-wider mb-0.5">ANCHO (Y)</span>
-                             <input 
-                               type="number"
-                               value={piece.ancho === 0 ? '' : Math.round(piece.ancho)}
-                               onChange={(e) => handleUpdate({ ancho: parseFloat(e.target.value) || 0 })}
-                               onClick={(e) => e.stopPropagation()}
-                               className="w-full min-w-0 bg-[#1a1a1a] border border-[#444444] rounded text-[12px] sm:text-[13px] text-white font-mono font-bold px-1 py-1 text-center focus:border-[#f0a144] outline-none"
-                             />
-                           </div>
-                         </div>
-
-                         {/* Interactive Cantos Badges */}
-                         <div className="grid grid-cols-4 gap-0.5 sm:gap-1 pt-0.5 w-full min-w-0">
-                            {(['largo1', 'largo2', 'ancho1', 'ancho2'] as const).map((edgeKey) => {
-                              const val = piece.cantos ? piece.cantos[edgeKey] : 'Ninguno';
-                              const isThick = val === 'Canto Grueso';
-                              const isThin = val === 'Canto Delgado';
-
-                              const toggleCanto = () => {
-                                const nextVal = val === 'Ninguno' ? 'Canto Delgado' : val === 'Canto Delgado' ? 'Canto Grueso' : 'Ninguno';
-                                handleUpdate({
-                                  cantos: { ...piece.cantos, [edgeKey]: nextVal }
-                                });
-                              };
-
-                              return (
-                                <button 
-                                  key={edgeKey}
-                                  onClick={(e) => { e.stopPropagation(); toggleCanto(); }}
-                                  className={`flex flex-col items-center justify-center py-1 px-0.5 rounded border transition-all min-w-0 w-full overflow-hidden ${
-                                    isThick ? 'bg-red-950/90 border-red-500/80 text-red-300' :
-                                    isThin ? 'bg-blue-950/90 border-blue-500/80 text-blue-300' :
-                                    'bg-[#222222] border-[#333333] text-[#777777] hover:text-white'
-                                  }`}
-                                  title={`${edgeKey === 'largo1' ? 'L1' : edgeKey === 'largo2' ? 'L2' : edgeKey === 'ancho1' ? 'A1' : 'A2'}: Click para cambiar (${val})`}
-                                >
-                                  <span className="text-[11px] font-mono font-bold uppercase truncate w-full text-center leading-none mb-0.5">
-                                    {edgeKey === 'largo1' ? 'L1' : edgeKey === 'largo2' ? 'L2' : edgeKey === 'ancho1' ? 'A1' : 'A2'}
-                                  </span>
-                                  <span className="text-[11px] font-mono font-semibold truncate w-full text-center leading-none">
-                                    {isThick ? 'Grueso' : isThin ? 'Delgado' : 'Sin'}
-                                  </span>
-                                </button>
-                              );
-                            })}
-                         </div>
-                       </div>
-                     );
-                   })}
-                 </div>
-               )}
-             </div>
           </div>
         </div>
 
         {/* Sidebar Configuration */}
         {showSettings && (
-          <div className="w-[280px] sm:w-80 shrink-0 border-l border-[#1a1a1a] bg-[#222222] p-4 sm:p-6 flex flex-col gap-4 sm:gap-6 animate-in slide-in-from-right-full duration-300 absolute right-0 top-0 bottom-0 z-30 shadow-2xl sm:relative sm:shadow-none">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-black text-white uppercase tracking-tighter">Parámetros</h3>
-              <button type="button" onClick={() => setShowSettings(false)} className="text-[#aaaaaa] hover:text-white transition-colors">
+          <div className="w-[300px] sm:w-88 shrink-0 border-l border-[#1a1a1a] bg-[#202020] flex flex-col animate-in slide-in-from-right-full duration-300 absolute right-0 top-0 bottom-0 z-30 shadow-2xl sm:relative sm:shadow-none overflow-hidden">
+            {/* Header with Title and Close Button */}
+            <div className="p-3.5 sm:p-4 border-b border-[#2d2d2d] flex items-center justify-between shrink-0 bg-[#242424]">
+              <div className="flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-[#f0a144]" />
+                <h3 className="text-xs font-black text-white uppercase tracking-wider">Ajustes & Calibración</h3>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setShowSettings(false)} 
+                className="p-1 rounded text-[#aaaaaa] hover:text-white hover:bg-[#333] transition-colors"
+                title="Cerrar panel de ajustes"
+              >
                 <Maximize2 className="w-3.5 h-3.5" />
               </button>
             </div>
 
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Formatos Rápidos</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button 
-                    onClick={() => onUpdateSheetConfig({ ...sheetConfig, width: 2440, height: 2140 })}
-                    className={`text-[11px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 2140 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
-                  >
-                    MELAMINA
-                    <br/><span className="text-[#666666] font-mono text-[11px]">2440 x 2140 mm</span>
-                  </button>
-                  <button 
-                    onClick={() => onUpdateSheetConfig({ ...sheetConfig, width: 2440, height: 1850 })}
-                    className={`text-[11px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 1850 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
-                  >
-                    MDF / DUPROLAC
-                    <br/><span className="text-[#666666] font-mono text-[11px]">2440 x 1850 mm</span>
-                  </button>
-                </div>
-              </div>
+            {/* Sub-tabs Selector */}
+            <div className="flex border-b border-[#2d2d2d] bg-[#1a1a1a] shrink-0">
+              <button
+                type="button"
+                onClick={() => setActiveSettingsTab('typography')}
+                className={`flex-1 py-2 px-1 text-[10px] font-bold uppercase transition-colors flex items-center justify-center gap-1.5 border-b-2 ${
+                  activeSettingsTab === 'typography' 
+                    ? 'border-[#f0a144] text-[#f0a144] bg-[#242424]' 
+                    : 'border-transparent text-[#888] hover:text-white'
+                }`}
+              >
+                <Type className="w-3 h-3 text-current" />
+                <span>Letras / Cotas</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSettingsTab('sheet')}
+                className={`flex-1 py-2 px-1 text-[10px] font-bold uppercase transition-colors flex items-center justify-center gap-1.5 border-b-2 ${
+                  activeSettingsTab === 'sheet' 
+                    ? 'border-[#f0a144] text-[#f0a144] bg-[#242424]' 
+                    : 'border-transparent text-[#888] hover:text-white'
+                }`}
+              >
+                <Sliders className="w-3 h-3 text-current" />
+                <span>Plancha & Hoja</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSettingsTab('stats')}
+                className={`flex-1 py-2 px-1 text-[10px] font-bold uppercase transition-colors flex items-center justify-center gap-1.5 border-b-2 ${
+                  activeSettingsTab === 'stats' 
+                    ? 'border-[#f0a144] text-[#f0a144] bg-[#242424]' 
+                    : 'border-transparent text-[#888] hover:text-white'
+                }`}
+              >
+                <BarChart3 className="w-3 h-3 text-current" />
+                <span>Métricas</span>
+              </button>
+            </div>
 
-              <div className="space-y-2">
-                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Dimensión Plancha</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                    <span className="text-[11px] text-[#666666] block mb-1">ANCHO (X)</span>
-                    <input 
-                      type="number" 
-                      value={sheetConfig.width === 0 ? '' : sheetConfig.width} 
-                      onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, width: parseInt(e.target.value) || 0 })}
-                      className="bg-transparent border-none outline-none text-white text-xs font-mono w-full"
-                    />
-                  </div>
-                  <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                    <span className="text-[11px] text-[#666666] block mb-1">LARGO (Y)</span>
-                    <input 
-                      type="number" 
-                      value={sheetConfig.height === 0 ? '' : sheetConfig.height} 
-                      onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, height: parseInt(e.target.value) || 0 })}
-                      className="bg-transparent border-none outline-none text-white text-xs font-mono w-full"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Herramienta / Corte</label>
-                <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                  <span className="text-[11px] text-[#666666] block mb-1">ESPESOR SIERRA (MERMA)</span>
-                  <div className="flex items-center gap-2">
-                    <input 
-                      type="number" 
-                      value={sheetConfig.kerf === 0 ? '' : sheetConfig.kerf} 
-                      step="0.5"
-                      onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, kerf: parseFloat(e.target.value) || 0 })}
-                      className="bg-transparent border-none outline-none text-[#f0a144] text-xs font-mono w-full"
-                    />
-                    <span className="text-[12px] text-[#666666] font-mono">MM</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Márgenes / Refilado</label>
-                <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
-                  <span className="text-[11px] text-[#666666] block mb-1">RECORTE PERIMETRAL</span>
-                  <div className="flex items-center gap-2">
-                    <input 
-                      type="number" 
-                      value={sheetConfig.margin === 0 ? '' : sheetConfig.margin} 
-                      onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, margin: parseInt(e.target.value) || 0 })}
-                      className="bg-transparent border-none outline-none text-[#da3c3c] text-xs font-mono w-full"
-                    />
-                    <span className="text-[12px] text-[#666666] font-mono">MM</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="pt-4 mt-6 border-t border-[#1a1a1a]">
-                <div className="bg-[#1a1a1a] border border-[#333333] rounded p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <BarChart3 className="w-3 h-3 text-[#f0a144]" />
-                    <span className="text-[12px] font-bold text-[#aaaaaa] uppercase tracking-wider">Resumen de compra</span>
-                  </div>
+            {/* Scrollable Content Container */}
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-3.5 sm:p-4 space-y-4">
+              {/* TAB 1: TYPOGRAPHY & CAD NUMBERS CALIBRATION */}
+              {activeSettingsTab === 'typography' && (
+                <div className="space-y-4 animate-in fade-in duration-200">
+                  {/* Presets Rápidos */}
                   <div className="space-y-1.5">
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">PIEZAS TOTALES:</span>
-                      <span className="text-white font-mono">{totalStats.piecesCount}</span>
+                    <div className="flex items-center justify-between">
+                      <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-wider flex items-center gap-1">
+                        <Sparkles className="w-3 h-3 text-[#f0a144]" />
+                        Calibración Rápida
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const def = {
+                            nameScale: 1.0,
+                            dimScale: 1.0,
+                            fontFamily: 'sans' as const,
+                            fontWeight: 'extrabold' as const,
+                            letterCase: 'uppercase' as const,
+                            showBadgeBg: false,
+                            dimStyle: 'default' as const
+                          };
+                          setCadTextConfig(def);
+                          try {
+                            localStorage.setItem('carpinteria_cad_text_calibration', JSON.stringify(def));
+                          } catch {}
+                        }}
+                        className="text-[8px] font-mono text-[#777] hover:text-[#f0a144] flex items-center gap-0.5 transition-colors"
+                        title="Restaurar a valores predeterminados"
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                        Reiniciar
+                      </button>
                     </div>
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">MATERIALES:</span>
-                      <span className="text-white font-mono">{totalStats.materialGroups}</span>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => updateCadTextConfig({ nameScale: 1.35, dimScale: 1.35, fontWeight: 'extrabold', showBadgeBg: true })}
+                        className={`p-1.5 rounded border text-left transition-all ${
+                          cadTextConfig.nameScale >= 1.3 
+                            ? 'bg-[#f0a144]/15 border-[#f0a144] text-[#f0a144]' 
+                            : 'bg-[#181818] border-[#333] text-[#aaa] hover:bg-[#252525]'
+                        }`}
+                      >
+                        <span className="text-[9px] font-black block">Taller / Impresión</span>
+                        <span className="text-[7.5px] text-[#777] block font-mono">135% • Máx. contraste</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateCadTextConfig({ nameScale: 1.15, dimScale: 1.15, fontWeight: 'bold' })}
+                        className={`p-1.5 rounded border text-left transition-all ${
+                          cadTextConfig.nameScale >= 1.1 && cadTextConfig.nameScale < 1.3 
+                            ? 'bg-[#f0a144]/15 border-[#f0a144] text-[#f0a144]' 
+                            : 'bg-[#181818] border-[#333] text-[#aaa] hover:bg-[#252525]'
+                        }`}
+                      >
+                        <span className="text-[9px] font-black block">Grande Legible</span>
+                        <span className="text-[7.5px] text-[#777] block font-mono">115% • Equilibrado</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateCadTextConfig({ nameScale: 1.0, dimScale: 1.0 })}
+                        className={`p-1.5 rounded border text-left transition-all ${
+                          cadTextConfig.nameScale >= 0.95 && cadTextConfig.nameScale <= 1.05 
+                            ? 'bg-[#f0a144]/15 border-[#f0a144] text-[#f0a144]' 
+                            : 'bg-[#181818] border-[#333] text-[#aaa] hover:bg-[#252525]'
+                        }`}
+                      >
+                        <span className="text-[9px] font-black block">Estándar CAD</span>
+                        <span className="text-[7.5px] text-[#777] block font-mono">100% • Vista óptima</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateCadTextConfig({ nameScale: 0.85, dimScale: 0.85 })}
+                        className={`p-1.5 rounded border text-left transition-all ${
+                          cadTextConfig.nameScale <= 0.9 
+                            ? 'bg-[#f0a144]/15 border-[#f0a144] text-[#f0a144]' 
+                            : 'bg-[#181818] border-[#333] text-[#aaa] hover:bg-[#252525]'
+                        }`}
+                      >
+                        <span className="text-[9px] font-black block">Compacto</span>
+                        <span className="text-[7.5px] text-[#777] block font-mono">85% • Muchas piezas</span>
+                      </button>
                     </div>
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">PLANCHAS:</span>
-                      <span className="text-white font-mono">{totalStats.boardsCount}</span>
+                  </div>
+
+                  {/* Sliders de Calibración Fina */}
+                  <div className="bg-[#181818] border border-[#333] p-3 rounded-lg space-y-3">
+                    {/* Calibrar Tamaño de Letras (Nombres) */}
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-[9px] font-bold text-white uppercase">Tamaño de Letras (Nombres)</span>
+                        <span className="text-[10px] font-mono font-bold text-[#f0a144] bg-black/40 px-1.5 py-0.5 rounded border border-[#333]">
+                          {Math.round(cadTextConfig.nameScale * 100)}%
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[8px] font-mono text-[#666]">60%</span>
+                        <input
+                          type="range"
+                          min="0.6"
+                          max="1.8"
+                          step="0.05"
+                          value={cadTextConfig.nameScale}
+                          onChange={(e) => updateCadTextConfig({ nameScale: parseFloat(e.target.value) })}
+                          className="w-full accent-[#f0a144] cursor-pointer h-1.5 bg-[#2a2a2a] rounded"
+                        />
+                        <span className="text-[8px] font-mono text-[#666]">180%</span>
+                      </div>
                     </div>
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">ÁREA PIEZAS:</span>
-                      <span className="text-white font-mono">{totalStats.requiredAreaM2.toFixed(2)} m²</span>
+
+                    {/* Calibrar Tamaño de Números (Cotas en mm) */}
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-[9px] font-bold text-white uppercase">Tamaño de Números (Cotas)</span>
+                        <span className="text-[10px] font-mono font-bold text-[#f0a144] bg-black/40 px-1.5 py-0.5 rounded border border-[#333]">
+                          {Math.round(cadTextConfig.dimScale * 100)}%
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[8px] font-mono text-[#666]">60%</span>
+                        <input
+                          type="range"
+                          min="0.6"
+                          max="1.8"
+                          step="0.05"
+                          value={cadTextConfig.dimScale}
+                          onChange={(e) => updateCadTextConfig({ dimScale: parseFloat(e.target.value) })}
+                          className="w-full accent-[#f0a144] cursor-pointer h-1.5 bg-[#2a2a2a] rounded"
+                        />
+                        <span className="text-[8px] font-mono text-[#666]">180%</span>
+                      </div>
                     </div>
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">ÁREA COMPRA:</span>
-                      <span className="text-white font-mono">{totalStats.purchaseAreaM2.toFixed(2)} m²</span>
+                  </div>
+
+                  {/* Estilo y Tipografía */}
+                  <div className="bg-[#181818] border border-[#333] p-3 rounded-lg space-y-2.5">
+                    <span className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-wider block">Estilo Tipográfico</span>
+                    
+                    {/* Fuente */}
+                    <div>
+                      <span className="text-[8px] text-[#777] block mb-1">Fuente tipográfica</span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {(['sans', 'mono', 'condensed'] as const).map((font) => (
+                          <button
+                            key={font}
+                            type="button"
+                            onClick={() => updateCadTextConfig({ fontFamily: font })}
+                            className={`py-1 text-[8.5px] rounded border uppercase font-medium transition-colors ${
+                              cadTextConfig.fontFamily === font 
+                                ? 'bg-[#f0a144] text-black border-[#f0a144] font-bold' 
+                                : 'bg-[#222] border-[#3a3a3a] text-[#aaa] hover:text-white'
+                            }`}
+                          >
+                            {font === 'sans' ? 'Sans Clean' : font === 'mono' ? 'Mono CAD' : 'Condensada'}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#666666] text-[12px]">MERMA:</span>
-                      <span className="text-rose-300 font-mono">{totalStats.wasteAreaM2.toFixed(2)} m²</span>
+
+                    {/* Grosor */}
+                    <div>
+                      <span className="text-[8px] text-[#777] block mb-1">Grosor de trazo</span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {(['normal', 'bold', 'extrabold'] as const).map((w) => (
+                          <button
+                            key={w}
+                            type="button"
+                            onClick={() => updateCadTextConfig({ fontWeight: w })}
+                            className={`py-1 text-[8.5px] rounded border uppercase transition-colors ${
+                              cadTextConfig.fontWeight === w 
+                                ? 'bg-[#f0a144] text-black border-[#f0a144] font-bold' 
+                                : 'bg-[#222] border-[#3a3a3a] text-[#aaa] hover:text-white'
+                            }`}
+                          >
+                            {w === 'normal' ? 'Medio' : w === 'bold' ? 'Negrita' : 'Extra Bold'}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="h-px bg-[#333333] my-2" />
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#3b82f6] text-[11px] font-bold">CANTO DELGADO:</span>
-                      <span className="text-[#3b82f6] font-mono font-bold">{edgebandingTotals.thin} m</span>
+
+                    {/* Color de Números / Cotas */}
+                    <div>
+                      <span className="text-[8px] text-[#777] block mb-1">Color de números (Cotas)</span>
+                      <div className="grid grid-cols-4 gap-1">
+                        {[
+                          { id: 'default', label: 'B/N', color: '#888' },
+                          { id: 'amber', label: 'Ámbar', color: '#f0a144' },
+                          { id: 'blue', label: 'Azul', color: '#3b82f6' },
+                          { id: 'red', label: 'Rojo', color: '#ef4444' }
+                        ].map((c) => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => updateCadTextConfig({ dimStyle: c.id as any })}
+                            className={`py-1 text-[8px] rounded border flex items-center justify-center gap-1 transition-colors ${
+                              cadTextConfig.dimStyle === c.id 
+                                ? 'bg-[#333] border-[#f0a144] text-white font-bold' 
+                                : 'bg-[#222] border-[#333] text-[#888] hover:text-white'
+                            }`}
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: c.color }} />
+                            <span>{c.label}</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="flex justify-between text-[12px]">
-                      <span className="text-[#ef4444] text-[11px] font-bold">CANTO GRUESO:</span>
-                      <span className="text-[#ef4444] font-mono font-bold">{edgebandingTotals.thick} m</span>
+
+                    {/* Checkbox: Fondo Placa / Badge de Contraste */}
+                    <div className="pt-1.5 border-t border-[#2a2a2a] flex items-center justify-between">
+                      <div>
+                        <span className="text-[8.5px] font-bold text-white block">Fondo de Alto Contraste</span>
+                        <span className="text-[7.5px] text-[#777] block">Añade una placa detrás de las cotas y nombres</span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={cadTextConfig.showBadgeBg}
+                        onChange={(e) => updateCadTextConfig({ showBadgeBg: e.target.checked })}
+                        className="w-4 h-4 rounded accent-[#f0a144] bg-[#222] border-[#444] cursor-pointer"
+                      />
                     </div>
                   </div>
                 </div>
-              </div>
+              )}
+
+              {/* TAB 2: SHEET CONFIG & KERF */}
+              {activeSettingsTab === 'sheet' && (
+                <div className="space-y-4 animate-in fade-in duration-200">
+                  <div className="space-y-2">
+                    <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Formatos Rápidos</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button 
+                        onClick={() => onUpdateSheetConfig({ ...sheetConfig, width: 2440, height: 2140 })}
+                        className={`text-[8px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 2140 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
+                      >
+                        MELAMINA
+                        <br/><span className="text-[#666666] font-mono text-[7px]">2440 x 2140 mm</span>
+                      </button>
+                      <button 
+                        onClick={() => onUpdateSheetConfig({ ...sheetConfig, width: 2440, height: 1850 })}
+                        className={`text-[8px] font-bold p-2 text-center rounded border transition-colors ${sheetConfig.width === 2440 && sheetConfig.height === 1850 ? 'bg-[#f0a144]/20 border-[#f0a144] text-white' : 'bg-[#1a1a1a] border-[#333333] text-[#aaaaaa] hover:bg-[#333333]'}`}
+                      >
+                        MDF / DUPROLAC
+                        <br/><span className="text-[#666666] font-mono text-[7px]">2440 x 1850 mm</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Dimensión Plancha</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
+                        <span className="text-[8px] text-[#666666] block mb-1">ANCHO (X)</span>
+                        <input 
+                          type="number" 
+                          value={sheetConfig.width === 0 ? '' : sheetConfig.width} 
+                          onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, width: parseInt(e.target.value) || 0 })}
+                          className="bg-transparent border-none outline-none text-white text-xs font-mono w-full"
+                        />
+                      </div>
+                      <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
+                        <span className="text-[8px] text-[#666666] block mb-1">LARGO (Y)</span>
+                        <input 
+                          type="number" 
+                          value={sheetConfig.height === 0 ? '' : sheetConfig.height} 
+                          onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, height: parseInt(e.target.value) || 0 })}
+                          className="bg-transparent border-none outline-none text-white text-xs font-mono w-full"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Herramienta / Corte</label>
+                    <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
+                      <span className="text-[8px] text-[#666666] block mb-1">ESPESOR SIERRA (MERMA)</span>
+                      <div className="flex items-center gap-2">
+                        <input 
+                          type="number" 
+                          value={sheetConfig.kerf === 0 ? '' : sheetConfig.kerf} 
+                          step="0.5"
+                          onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, kerf: parseFloat(e.target.value) || 0 })}
+                          className="bg-transparent border-none outline-none text-[#f0a144] text-xs font-mono w-full"
+                        />
+                        <span className="text-[9px] text-[#666666] font-mono">MM</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Márgenes / Refilado</label>
+                    <div className="bg-[#1a1a1a] border border-[#333333] p-2 rounded">
+                      <span className="text-[8px] text-[#666666] block mb-1">RECORTE PERIMETRAL</span>
+                      <div className="flex items-center gap-2">
+                        <input 
+                          type="number" 
+                          value={sheetConfig.margin === 0 ? '' : sheetConfig.margin} 
+                          onChange={(e) => onUpdateSheetConfig({ ...sheetConfig, margin: parseInt(e.target.value) || 0 })}
+                          className="bg-transparent border-none outline-none text-[#da3c3c] text-xs font-mono w-full"
+                        />
+                        <span className="text-[9px] text-[#666666] font-mono">MM</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {onUpdateEdgeThicknessConfig && (
+                    <div className="space-y-2">
+                      <label className="text-[9px] font-bold text-[#aaaaaa] uppercase tracking-widest block">Grosores de Canto (Descuento)</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-[#1a1a1a] border border-red-950/60 p-2 rounded">
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <span className="w-2 h-2 rounded-full bg-red-600 inline-block"></span>
+                            <span className="text-[8px] text-[#aaaaaa] font-bold">CANTO GRUESO</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <input 
+                              type="number"
+                              step="0.5"
+                              min="0"
+                              max="10"
+                              value={edgeThicknessConfig.grueso}
+                              onChange={(e) => onUpdateEdgeThicknessConfig({ ...edgeThicknessConfig, grueso: parseFloat(e.target.value) || 0 })}
+                              className="bg-transparent border-none outline-none text-red-400 text-xs font-mono font-bold w-full"
+                            />
+                            <span className="text-[9px] text-[#666666] font-mono">MM</span>
+                          </div>
+                        </div>
+                        <div className="bg-[#1a1a1a] border border-blue-950/60 p-2 rounded">
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <span className="w-2 h-2 rounded-full bg-blue-600 inline-block"></span>
+                            <span className="text-[8px] text-[#aaaaaa] font-bold">CANTO DELGADO</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <input 
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              max="5"
+                              value={edgeThicknessConfig.delgado}
+                              onChange={(e) => onUpdateEdgeThicknessConfig({ ...edgeThicknessConfig, delgado: parseFloat(e.target.value) || 0 })}
+                              className="bg-transparent border-none outline-none text-blue-400 text-xs font-mono font-bold w-full"
+                            />
+                            <span className="text-[9px] text-[#666666] font-mono">MM</span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="text-[7.5px] text-[#777777] block font-mono leading-tight">
+                        * El Canto Grueso descuenta {edgeThicknessConfig.grueso}mm por lado en las medidas de corte.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* TAB 3: STATS */}
+              {activeSettingsTab === 'stats' && (
+                <div className="space-y-4 animate-in fade-in duration-200">
+                  <div className="bg-[#181818] border border-[#333333] rounded-lg p-3.5 space-y-2">
+                    <div className="flex items-center gap-2 mb-2">
+                      <BarChart3 className="w-3.5 h-3.5 text-[#f0a144]" />
+                      <span className="text-[10px] font-bold text-white uppercase tracking-wider">Resumen de Métricas</span>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <span className="text-[#888]">PIEZAS TOTALES:</span>
+                        <span className="text-white font-mono font-bold bg-[#242424] px-1.5 py-0.5 rounded">{pieces.reduce((acc, p) => acc + p.cantidad, 0)}</span>
+                      </div>
+                      <div className="flex justify-between items-center text-[10px]">
+                        <span className="text-[#888]">ÁREA USADA:</span>
+                        <span className="text-white font-mono font-bold">{(totalStats.areaUsed / 1000000).toFixed(3)} m²</span>
+                      </div>
+                      <div className="flex justify-between items-center text-[10px]">
+                        <span className="text-[#888]">PIEZAS ÚNICAS:</span>
+                        <span className="text-white font-mono font-bold">{pieces.length}</span>
+                      </div>
+                      <div className="h-px bg-[#2d2d2d] my-1" />
+                      <div className="flex justify-between items-center text-[10px]">
+                        <span className="text-[#3b82f6] font-bold">CANTO DELGADO:</span>
+                        <span className="text-[#3b82f6] font-mono font-bold">{edgebandingTotals.thin} m</span>
+                      </div>
+                      <div className="flex justify-between items-center text-[10px]">
+                        <span className="text-[#ef4444] font-bold">CANTO GRUESO:</span>
+                        <span className="text-[#ef4444] font-mono font-bold">{edgebandingTotals.thick} m</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
             
-            <div className="mt-auto">
+            {/* Sticky Bottom Footer with PDF Export Button */}
+            <div className="p-3 border-t border-[#2d2d2d] bg-[#1a1a1a] shrink-0">
               <button 
                 type="button"
-                onClick={() => window.print()}
-                className="w-full bg-[#1a1a1a] hover:bg-[#333333] text-[#aaaaaa] hover:text-white border border-[#333333] py-3 rounded-lg flex items-center justify-center gap-2 text-[12px] font-bold uppercase transition-all shadow-xl"
+                onClick={() => setShowPdfExport(true)}
+                className="w-full bg-[#f0a144] hover:bg-[#ffb055] text-black font-extrabold border border-[#f0a144] py-2.5 rounded-lg flex items-center justify-center gap-2 text-[10px] uppercase tracking-wider transition-all shadow-lg active:scale-98"
               >
-                Imprimir / Guardar PDF
+                <FileText className="w-3.5 h-3.5" />
+                Imprimir / Exportar PDF de Taller
               </button>
             </div>
           </div>
         )}
       </div>
+
+      {/* Modal de Exportación Didáctica en PDF para Taller de Carpintería */}
+      <PdfExportModal
+        isOpen={showPdfExport}
+        onClose={() => setShowPdfExport(false)}
+        boardGroups={boardGroups}
+        pieces={pieces}
+        sheetConfig={sheetConfig}
+        edgeThicknessConfig={edgeThicknessConfig || DEFAULT_EDGE_THICKNESS_CONFIG}
+        projectName="Proyecto de Carpintería"
+      />
+
+      {/* Modal de Consolidado y Cálculo de Materiales (Melamina, MDF, Vidrio, Tapacantos) */}
+      <MaterialSummaryModal
+        isOpen={showMaterialSummaryModal}
+        onClose={() => setShowMaterialSummaryModal(false)}
+        boardGroups={boardGroups}
+        totalStats={totalStats}
+      />
     </div>
   );
 }
+

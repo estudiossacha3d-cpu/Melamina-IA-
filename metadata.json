@@ -1,6 +1,8 @@
 {
-  "name": "",
-  "description": "",
+  "name": "Diseñador y Despiece 3D de Melamina",
+  "description": "Herramienta 3D de diseño, dimensionamiento y optimización de cortes de melamina",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
