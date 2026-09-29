@@ -93,18 +93,7 @@ export interface Piece {
   hidden?: boolean;
 }
 
-export interface DynamicParameter {
-  id: string;
-  name: string;
-  label: string;
-  type: 'dimension' | 'number' | 'boolean' | 'select';
-  defaultValue: string | number | boolean;
-  options?: string[];
-  unit?: string;
-  description?: string;
-}
-
-export interface DynamicFurnitureItem {
+export interface FurnitureCatalogItem {
   id: string;
   name: string;
   category: string;
@@ -118,7 +107,6 @@ export interface DynamicFurnitureItem {
   thickness: number; // Espesor estándar (18, 15, etc.) en mm
   tags: string[];
   pieces: Piece[]; // Piezas 3D que componen el mueble
-  dynamicParameters?: DynamicParameter[];
   status: 'ready_for_3d' | 'has_3d';
   createdAt: string;
   updatedAt: string;

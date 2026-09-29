@@ -3,8 +3,13 @@ name: Validate CAD app
 on:
   push:
     branches:
-      - feature/estante-zocalo
+      - main
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

@@ -8,22 +8,21 @@ import {
   GripHorizontal, PanelRight, ChevronDown, ChevronUp, RotateCcw, FolderPlus, Check
 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
-import { DynamicFurnitureItem, Piece, Group3D } from '../types';
-import { DEFAULT_FURNITURE_CATEGORIES, DEFAULT_FURNITURE_CATALOG } from '../data/defaultFurniture';
+import { FurnitureCatalogItem, Piece, Group3D } from '../types';
+import { DEFAULT_FURNITURE_CATEGORIES } from '../data/defaultFurniture';
 import Warehouse3DPreview from './Warehouse3DPreview';
 import { getFurnitureEffectivePieces, calculateFurnitureMetrics } from '../lib/furnitureHelpers';
 import { useDraggableWindow } from '../hooks/useDraggableWindow';
+import { loadWarehouseCatalog, saveWarehouseCatalog } from '../lib/warehouseStorage';
 
 interface FurnitureWarehouseProps {
   currentPieces: Piece[];
   groups?: Group3D[];
   selectedPieceIds?: string[];
-  onLoadFurnitureTo3D: (furniture: DynamicFurnitureItem, mode?: 'replace' | 'insert') => void;
-  onSaveCurrent3DAsFurniture?: (furnitureData: Partial<DynamicFurnitureItem>) => void;
+  onLoadFurnitureTo3D: (furniture: FurnitureCatalogItem, mode?: 'replace' | 'insert') => void;
+  onSaveCurrent3DAsFurniture?: (furnitureData: Partial<FurnitureCatalogItem>) => void;
   onClose?: () => void;
 }
-
-const STORAGE_KEY = 'ia_mueble_almacen_v2';
 
 export default function FurnitureWarehouse({
   currentPieces,
@@ -69,21 +68,9 @@ export default function FurnitureWarehouse({
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
 
   // Load furniture items from localStorage (starts empty so user can upload their own 3D models)
-  const [catalog, setCatalog] = useState<DynamicFurnitureItem[]>(() => {
-    try {
-      localStorage.removeItem('ia_mueble_almacen_dinamico_v1');
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        }
-      }
-    } catch (e) {
-      console.warn('Error loading furniture warehouse from storage:', e);
-    }
-    return [];
-  });
+  const [catalog, setCatalog] = useState<FurnitureCatalogItem[]>(() => (
+    typeof window === 'undefined' ? [] : loadWarehouseCatalog(window.localStorage)
+  ));
 
   // Custom categories
   const [categories, setCategories] = useState<string[]>(() => {
@@ -155,13 +142,13 @@ export default function FurnitureWarehouse({
   }, [categories, categoryFilterQuery]);
 
   // Interactive 3D Inspector Modal
-  const [inspectingFurniture, setInspectingFurniture] = useState<DynamicFurnitureItem | null>(null);
+  const [inspectingFurniture, setInspectingFurniture] = useState<FurnitureCatalogItem | null>(null);
   const [inspectExplode, setInspectExplode] = useState<number>(0);
   const [inspectHighlightedPieceId, setInspectHighlightedPieceId] = useState<string | null>(null);
 
   // Creation / Editing Modal
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<DynamicFurnitureItem | null>(null);
+  const [editingItem, setEditingItem] = useState<FurnitureCatalogItem | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
 
@@ -172,7 +159,7 @@ export default function FurnitureWarehouse({
   // Form state
   const [formData, setFormData] = useState({
     name: '',
-    category: 'Cocina',
+    category: 'Estantes',
     newCustomCategory: '',
     subcategory: '',
     description: '',
@@ -185,10 +172,10 @@ export default function FurnitureWarehouse({
     attachCurrent3D: true
   });
 
-  const saveCatalog = (newCatalog: DynamicFurnitureItem[]) => {
+  const saveCatalog = (newCatalog: FurnitureCatalogItem[]) => {
     setCatalog(newCatalog);
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(newCatalog));
+      saveWarehouseCatalog(localStorage, newCatalog);
     } catch (err) {
       console.error('Error saving warehouse catalog to localStorage:', err);
     }
@@ -248,7 +235,7 @@ export default function FurnitureWarehouse({
     setIsCreateModalOpen(true);
   };
 
-  const handleOpenEditModal = (item: DynamicFurnitureItem) => {
+  const handleOpenEditModal = (item: FurnitureCatalogItem) => {
     setEditingItem(item);
     setFormData({
       name: item.name,
@@ -311,7 +298,7 @@ export default function FurnitureWarehouse({
     } else {
       const piecesToSave: Piece[] = JSON.parse(JSON.stringify(getPiecesToSaveFrom3D()));
 
-      const newItem: DynamicFurnitureItem = {
+      const newItem: FurnitureCatalogItem = {
         id: `furn-${uuidv4().substring(0, 8)}`,
         name: formData.name.trim(),
         category: finalCategory,
@@ -329,11 +316,6 @@ export default function FurnitureWarehouse({
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         notes: formData.notes.trim() || undefined,
-        dynamicParameters: [
-          { id: 'p_w', name: 'ancho', label: 'Ancho Total', type: 'dimension', defaultValue: Number(formData.width) || 800, unit: 'mm' },
-          { id: 'p_h', name: 'alto', label: 'Alto Total', type: 'dimension', defaultValue: Number(formData.height) || 750, unit: 'mm' },
-          { id: 'p_d', name: 'profundidad', label: 'Profundidad', type: 'dimension', defaultValue: Number(formData.depth) || 550, unit: 'mm' }
-        ]
       };
 
       saveCatalog([newItem, ...catalog]);
@@ -354,8 +336,8 @@ export default function FurnitureWarehouse({
     showToast('Mueble eliminado del almacén.');
   };
 
-  const handleDuplicate = (item: DynamicFurnitureItem) => {
-    const duplicated: DynamicFurnitureItem = {
+  const handleDuplicate = (item: FurnitureCatalogItem) => {
+    const duplicated: FurnitureCatalogItem = {
       ...item,
       id: `furn-${uuidv4().substring(0, 8)}`,
       name: `${item.name} (Copia)`,
@@ -388,7 +370,7 @@ export default function FurnitureWarehouse({
         if (Array.isArray(parsed) && parsed.length > 0) {
           saveCatalog(parsed);
           const newCats = [...DEFAULT_FURNITURE_CATEGORIES];
-          parsed.forEach((item: DynamicFurnitureItem) => {
+          parsed.forEach((item: FurnitureCatalogItem) => {
             if (item.category && !newCats.includes(item.category)) {
               newCats.push(item.category);
             }

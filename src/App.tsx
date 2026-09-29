@@ -3,7 +3,7 @@ import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Pl
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 import { interpretFurnitureImage } from './lib/gemini';
-import { Piece, EdgeConfig, Group3D, DynamicFurnitureItem, EdgeThicknessConfig, PieceFaceKey } from './types';
+import { Piece, EdgeConfig, Group3D, FurnitureCatalogItem, EdgeThicknessConfig, PieceFaceKey } from './types';
 import { DEFAULT_EDGE_THICKNESS_CONFIG, calculatePieceCutDimensions } from './lib/edgeCalculations';
 import { FredoStretchAxis, FredoStretchMode, calculateFredoStretch, computePiecesBoundingBoxMm } from './lib/fredoStretch';
 import ThreeViewer, { MATERIAL_MAP, getMaterialEmoji, getGroupedMaterials } from './components/ThreeViewer';
@@ -1230,7 +1230,7 @@ export default function App() {
     showToast('Cambiando a Plano de Corte 2D...');
   };
 
-  const handleLoadFurnitureFromWarehouse = (furniture: DynamicFurnitureItem, mode: 'replace' | 'insert' = 'replace') => {
+  const handleLoadFurnitureFromWarehouse = (furniture: FurnitureCatalogItem, mode: 'replace' | 'insert' = 'replace') => {
     let piecesToLoad: Piece[] = [];
     const newGroupId = uuidv4();
     if (furniture.pieces && furniture.pieces.length > 0) {
@@ -1520,7 +1520,7 @@ export default function App() {
               type="button"
               onClick={() => setViewMode('warehouse')}
               className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-0.5 rounded text-[9.5px] sm:text-[10px] font-bold transition-colors ${viewMode === 'warehouse' ? 'bg-amber-600 text-white shadow-inner' : 'hover:bg-[#333333] text-amber-400'}`}
-              title="Almacén de muebles modulares dinámicos"
+              title="Almacén de muebles"
             >
               <Package className="w-3 h-3 shrink-0" />
               <span>Almacén</span>
@@ -1599,7 +1599,7 @@ export default function App() {
              icon={<Package />} 
              active={viewMode === 'warehouse'} 
              onClick={() => setViewMode(viewMode === 'warehouse' ? '3d' : 'warehouse')} 
-             title="Almacén de Muebles Dinámicos" 
+             title="Almacén de muebles"
            />
            <ToolbarIcon icon={<Plus />} active={false} onClick={addPiece} title="Agregar Pieza" />
            <ToolbarIcon 
@@ -1623,7 +1623,7 @@ export default function App() {
           <div className={`h-7 bg-[#333333]/80 backdrop-blur-sm border-b border-[#1a1a1a] items-center px-4 space-x-4 z-10 ${viewMode === 'warehouse' ? 'hidden' : 'flex'}`}>
             <div className="flex items-center gap-1.5 text-[10px] font-bold text-[#aaaaaa]">
               <span className="text-[#f0a144]">
-                {viewMode === 'warehouse' ? 'Almacén de Muebles Dinámicos' : viewMode === '2d' ? 'Diagrama de Corte 2D' : 'Object Mode 3D'}
+                {viewMode === 'warehouse' ? 'Almacén de muebles' : viewMode === '2d' ? 'Diagrama de Corte 2D' : 'Object Mode 3D'}
               </span>
             </div>
             
@@ -1897,7 +1897,7 @@ export default function App() {
                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#181818] border border-white/5 text-gray-300 font-medium">
                      <span className="text-[#f0a144] font-bold">Almacén</span>
                    </span>
-                   <span className="text-gray-400 hidden sm:inline">Catálogo de muebles dinámicos</span>
+                   <span className="text-gray-400 hidden sm:inline">Catálogo de muebles</span>
                  </div>
                ) : selectedPieceIds.length > 0 && transformMode === 'rotate' ? (
                  /* ROTATION MODE (Grados) */
@@ -5083,4 +5083,3 @@ function PropertyField({ label, value, onChange, axis }: { label: string, value:
     </div>
   );
 }
-

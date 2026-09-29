@@ -1,10 +1,10 @@
-import { DynamicFurnitureItem, Piece } from '../types';
+import { FurnitureCatalogItem, Piece } from '../types';
 
 /**
  * Ensures that every furniture item in the warehouse has realistic, correctly-oriented 3D pieces,
- * whether custom-created in 3D or generated from dynamic dimensions.
+ * whether custom-created in 3D or loaded from the furniture catalog.
  */
-export function getFurnitureEffectivePieces(item: DynamicFurnitureItem): Piece[] {
+export function getFurnitureEffectivePieces(item: FurnitureCatalogItem): Piece[] {
   if (item.pieces && item.pieces.length > 0) {
     return item.pieces;
   }

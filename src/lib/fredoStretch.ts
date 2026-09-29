@@ -93,6 +93,7 @@ export function calculateFredoStretch(options: FredoStretchOptions): FredoStretc
   const axisIdx = axis === 'X' ? 0 : axis === 'Y' ? 1 : 2;
   const axisMin = initialBounds.min.getComponent(axisIdx);
   const axisSize = initialBounds.size.getComponent(axisIdx);
+  const safeDeltaMm = Math.max(10 - axisSize, deltaMm);
 
   // Position of the cutting mesh plane along the chosen axis in mm
   const planePos = axisMin + axisSize * Math.max(0.05, Math.min(0.95, planeRatio));
@@ -136,16 +137,16 @@ export function calculateFredoStretch(options: FredoStretchOptions): FredoStretc
       const alignAncho = Math.abs(vZ.getComponent(axisIdx));
 
       if (alignLargo >= alignAncho) {
-        newLargo = Math.max(10, Math.round(p.largo + deltaMm));
+        newLargo = Math.max(10, Math.round(p.largo + safeDeltaMm));
       } else {
-        newAncho = Math.max(10, Math.round(p.ancho + deltaMm));
+        newAncho = Math.max(10, Math.round(p.ancho + safeDeltaMm));
       }
 
       // Center shift for crossing pieces depends on anchoring
       if (mode === 'anchor-neg') {
-        shift = deltaMm / 2;
+        shift = safeDeltaMm / 2;
       } else if (mode === 'anchor-pos') {
-        shift = -deltaMm / 2;
+        shift = -safeDeltaMm / 2;
       } else {
         // center mode: expands symmetrically, center remains fixed
         shift = 0;
@@ -155,20 +156,20 @@ export function calculateFredoStretch(options: FredoStretchOptions): FredoStretc
       if (mode === 'anchor-neg') {
         shift = 0; // Anchored side stays fixed
       } else if (mode === 'anchor-pos') {
-        shift = -deltaMm; // Opposite side pulled outward
+        shift = -safeDeltaMm; // Opposite side pulled outward
       } else {
         // center mode: negative side shifts outwards by -delta/2
-        shift = -deltaMm / 2;
+        shift = -safeDeltaMm / 2;
       }
     } else if (isStrictlyPositive) {
       // Piece is completely after the cutting plane
       if (mode === 'anchor-neg') {
-        shift = deltaMm; // Positive side pulled outward
+        shift = safeDeltaMm; // Positive side pulled outward
       } else if (mode === 'anchor-pos') {
         shift = 0; // Anchored side stays fixed
       } else {
         // center mode: positive side shifts outwards by +delta/2
-        shift = deltaMm / 2;
+        shift = safeDeltaMm / 2;
       }
     }
 
@@ -188,6 +189,6 @@ export function calculateFredoStretch(options: FredoStretchOptions): FredoStretc
   return {
     updatedPieces,
     newBounds,
-    deltaApplied: deltaMm
+    deltaApplied: safeDeltaMm
   };
 }
