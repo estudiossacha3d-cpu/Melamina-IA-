@@ -124,6 +124,58 @@ export interface CutDimensionResult {
 }
 
 /**
+ * Determina si la pieza es un divisor/separador vertical cuyo canto frontal está reubicado en A1
+ * cuando la altura entre repisas es menor a la profundidad (depth > tierH).
+ */
+export function isA1RelocatedToFront(piece: { name?: string; id?: string; largo: number; ancho: number; cantos?: EdgeConfig }): boolean {
+  if (!piece.cantos) return false;
+  const isDivider = Boolean(
+    piece.name?.toLowerCase().includes('separador') ||
+    piece.name?.toLowerCase().includes('divisor') ||
+    piece.id?.includes('separador') ||
+    piece.id?.includes('divisor') ||
+    piece.id?.includes('casillero')
+  );
+  return Boolean(
+    piece.cantos.largo1 === 'Ninguno' &&
+    piece.cantos.ancho1 &&
+    piece.cantos.ancho1 !== 'Ninguno' &&
+    (isDivider || piece.ancho > piece.largo)
+  );
+}
+
+/**
+ * Retorna las longitudes reales en milímetros de cada uno de los 4 cantos de la pieza.
+ * - L1 y L2 tienen longitud = piece.largo
+ * - A1 y A2 tienen longitud = piece.ancho
+ * Permite sumar con precisión exacta el metrado total en metros lineales.
+ */
+export function getPieceEdgeLengths(piece: { name?: string; id?: string; largo: number; ancho: number; cantos?: EdgeConfig }) {
+  const isA1Front = isA1RelocatedToFront(piece);
+  // Compatibilidad defensiva: si una pieza tiene largo < ancho y el canto frontal en A1,
+  // asegura que A1 corresponda a la medida corta real (tierH) para el metrado exacto:
+  if (isA1Front && piece.largo < piece.ancho) {
+    const shortDim = Math.min(piece.largo, piece.ancho);
+    const longDim = Math.max(piece.largo, piece.ancho);
+    return {
+      largo1: longDim,
+      largo2: longDim,
+      ancho1: shortDim,
+      ancho2: shortDim,
+      isA1Front: true
+    };
+  }
+
+  return {
+    largo1: piece.largo,
+    largo2: piece.largo,
+    ancho1: piece.ancho,
+    ancho2: piece.ancho,
+    isA1Front
+  };
+}
+
+/**
  * Calcula las medidas netas de corte descontando los cantos según la regla universal de carpintería:
  * - A1 y A2 son los cantos en los anchos (extremos en X), por tanto descuentan del LARGO de corte.
  *   Si ambos tienen canto delgado (0.45mm cada uno), descuenta 1 mm total en el Largo.
@@ -131,12 +183,35 @@ export interface CutDimensionResult {
  *   Si ambos tienen canto delgado (0.45mm cada uno), descuenta 1 mm total en el Ancho.
  */
 export function calculatePieceCutDimensions(
-  piece: { largo: number; ancho: number; cantos?: EdgeConfig },
+  piece: { name?: string; id?: string; largo: number; ancho: number; cantos?: EdgeConfig },
   config: EdgeThicknessConfig = DEFAULT_EDGE_THICKNESS_CONFIG
 ): CutDimensionResult {
   const cantos = piece.cantos;
   const largoFinal = piece.largo;
   const anchoFinal = piece.ancho;
+
+  const isA1Front = isA1RelocatedToFront(piece);
+
+  // Si la pieza viene con dimensiones invertidas heredadas (largo < ancho, ej. largo=208, ancho=378)
+  // donde la profundidad estaba en 'ancho' y el canto frontal en A1:
+  if (isA1Front && piece.largo < piece.ancho) {
+    const pairFrontDepth = calculatePairDeduction(cantos?.ancho1, cantos?.ancho2, config);
+    const descDepthTotal = Math.round(pairFrontDepth.total * 100) / 100;
+    const anchoCorte = Math.max(1, Math.round((anchoFinal - descDepthTotal) * 10) / 10);
+    return {
+      largoFinal,
+      anchoFinal,
+      largoCorte: largoFinal,
+      anchoCorte,
+      descuentoA1: pairFrontDepth.desc1,
+      descuentoA2: pairFrontDepth.desc2,
+      descuentoL1: 0,
+      descuentoL2: 0,
+      descuentoLargoTotal: 0,
+      descuentoAnchoTotal: descDepthTotal,
+      tieneDescuento: descDepthTotal > 0
+    };
+  }
 
   // A1 y A2 están en los anchos y limitan la longitud (Largo)
   const pairLargo = calculatePairDeduction(cantos?.ancho1, cantos?.ancho2, config);
@@ -168,4 +243,5 @@ export function calculatePieceCutDimensions(
     tieneDescuento: descLargoTotal > 0 || descAnchoTotal > 0
   };
 }
+
 

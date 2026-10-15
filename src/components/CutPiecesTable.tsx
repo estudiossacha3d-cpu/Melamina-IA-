@@ -112,11 +112,17 @@ export const CutPiecesTable: React.FC<CutPiecesTableProps> = ({
       ancho2: oldCantos.largo2,
     };
 
+    const isCurrentTransversal = group.representative.veta && (group.representative.vetaOrientacion === 'transversal' || group.representative.vetaRotation === 90);
+    const newVetaOrientacion = group.representative.veta ? (isCurrentTransversal ? 'longitudinal' : 'transversal') : group.representative.vetaOrientacion;
+    const newVetaRotation = group.representative.veta ? (isCurrentTransversal ? 0 : 90) : group.representative.vetaRotation;
+
     group.ids.forEach(id => {
       updatePiece(id, {
         largo: oldAncho,
         ancho: oldLargo,
         cantos: newCantos,
+        vetaOrientacion: newVetaOrientacion,
+        vetaRotation: newVetaRotation,
       });
     });
   };
@@ -260,6 +266,8 @@ export const CutPiecesTable: React.FC<CutPiecesTableProps> = ({
                     ids.forEach(id => updatePiece(id, updates));
                   };
 
+                  const isTransversal = Boolean(piece.veta && (piece.vetaOrientacion === 'transversal' || piece.vetaRotation === 90 || piece.vetaRotation === 270));
+
                   return (
                     <tr
                       key={key}
@@ -298,6 +306,14 @@ export const CutPiecesTable: React.FC<CutPiecesTableProps> = ({
                             placeholder="Pieza"
                             title={piece.name}
                           />
+                          {isTransversal && (
+                            <span 
+                              className="px-1 py-0.2 rounded text-[6.5px] font-mono font-black bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0 select-none"
+                              title="Veta transversal (rotada 90° para calzar en la plancha)"
+                            >
+                              90°
+                            </span>
+                          )}
                         </div>
                       </td>
 
@@ -385,27 +401,40 @@ export const CutPiecesTable: React.FC<CutPiecesTableProps> = ({
                         </button>
                       </td>
 
-                      {/* Veta - Compacto */}
+                      {/* Veta - Compacto con ciclo inteligente: Sin Veta -> Veta 0° (Estándar) -> Veta 90° (Transversal) -> Sin Veta */}
                       <td className="py-0.5 px-0.5 text-center">
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            const nextVeta = !piece.veta;
-                            handleUpdate({ 
-                              veta: nextVeta,
-                              ...(nextVeta ? { rotacion: false } : {}),
-                            });
+                            if (!piece.veta) {
+                              // Activar veta estándar longitudinal 0°
+                              handleUpdate({ veta: true, vetaOrientacion: 'longitudinal', vetaRotation: 0, rotacion: false });
+                            } else if (!isTransversal) {
+                              // Rotar a transversal 90° (separa la pieza en corte 2D)
+                              handleUpdate({ veta: true, vetaOrientacion: 'transversal', vetaRotation: 90, rotacion: false });
+                            } else {
+                              // Desactivar veta
+                              handleUpdate({ veta: false, vetaRotation: 0, vetaOrientacion: 'longitudinal', rotacion: false });
+                            }
                           }}
                           className={`w-3.5 h-3.5 flex items-center justify-center rounded transition-colors mx-auto ${
-                            piece.veta 
-                              ? 'bg-emerald-950 border border-emerald-500 text-emerald-300 font-bold' 
-                              : 'text-[#555] hover:text-white hover:bg-[#222] border border-transparent'
+                            !piece.veta 
+                              ? 'text-[#555] hover:text-white hover:bg-[#222] border border-transparent'
+                              : isTransversal
+                                ? 'bg-amber-950 border border-amber-500 text-amber-300 font-black'
+                                : 'bg-emerald-950 border border-emerald-500 text-emerald-300 font-bold'
                           }`}
-                          title={`Veta: ${piece.veta ? 'Sí (Bloquea rotación de 90°)' : 'No (Sin dirección de veta)'}`}
+                          title={
+                            !piece.veta 
+                              ? "Sin veta (Clic para activar veta 0°)" 
+                              : isTransversal
+                                ? "Veta: Transversal 90° (Separada en corte 2D). Clic para desactivar"
+                                : "Veta: Longitudinal estándar 0°. Clic para rotar 90° (separar en corte)"
+                          }
                         >
                           <span className="font-mono text-[7px] font-bold">
-                            {piece.veta ? 'S' : '−'}
+                            {!piece.veta ? '−' : isTransversal ? '90°' : '0°'}
                           </span>
                         </button>
                       </td>
@@ -521,7 +550,11 @@ export const CutPiecesTable: React.FC<CutPiecesTableProps> = ({
                               ? 'bg-purple-950 text-purple-300 border border-purple-500 font-bold' 
                               : 'text-[#555] hover:text-white hover:bg-[#222]'
                           }`}
-                          title={piece.ranurado ? "Ranurado activo" : "Sin ranurado"}
+                          title={
+                            piece.ranurado 
+                              ? `Ranura activa: Lado ${piece.ranuraConfig?.lado || 'L1'} (${piece.ranuraConfig?.cara === 'inferior' ? 'Cara Inferior / Interna' : 'Cara Superior / Externa'}) a ${piece.ranuraConfig?.dist || 18}mm | Prof: ${piece.ranuraConfig?.prof || 8}mm | Fondo: ${piece.ranuraConfig?.esp || 4}mm` 
+                              : "Sin ranurado (Click para activar ranura)"
+                          }
                         >
                           {piece.ranurado ? 'R' : '−'}
                         </button>

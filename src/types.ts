@@ -33,6 +33,8 @@ export interface FaceTextureOptions {
   repeatX?: number;
   repeatY?: number;
   rotation?: number; // 0, 90, 180, 270
+  offsetX?: number;
+  offsetY?: number;
 }
 
 export interface CustomTextureItem {
@@ -88,12 +90,31 @@ export interface Piece {
     dist: number; // distancia en mm
     esp: number; // espesor de ranura en mm
     prof: number; // profundidad de ranura en mm
+    cara?: 'superior' | 'inferior'; // cara sobre la cual se fresa la ranura
   };
   abisagrado?: boolean;
   hidden?: boolean;
+  isDoor?: boolean;
+  doorHingeSide?: 'left' | 'right';
+  doorRole?: string;
+  nominalPosition3D?: [number, number, number];
+  doorW?: number;
+  doorT?: number;
+  doorOpenAngle?: number;
 }
 
-export interface FurnitureCatalogItem {
+export interface DynamicParameter {
+  id: string;
+  name: string;
+  label: string;
+  type: 'dimension' | 'number' | 'boolean' | 'select';
+  defaultValue: string | number | boolean;
+  options?: string[];
+  unit?: string;
+  description?: string;
+}
+
+export interface DynamicFurnitureItem {
   id: string;
   name: string;
   category: string;
@@ -107,6 +128,8 @@ export interface FurnitureCatalogItem {
   thickness: number; // Espesor estándar (18, 15, etc.) en mm
   tags: string[];
   pieces: Piece[]; // Piezas 3D que componen el mueble
+  dynamicParameters?: DynamicParameter[];
+  dynamicShelfConfig?: any;
   status: 'ready_for_3d' | 'has_3d';
   createdAt: string;
   updatedAt: string;

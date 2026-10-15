@@ -56,21 +56,38 @@ class GlobalErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySta
             <p style={{ fontSize: '13px', color: '#aaa', marginBottom: '20px', lineHeight: 1.5 }}>
               La memoria del dispositivo se saturó temporalmente al cambiar de pantalla o navegador. Pulsa el botón para recargar.
             </p>
-            <button
-              onClick={() => window.location.reload()}
-              style={{
-                backgroundColor: '#f0a144',
-                color: '#111',
-                fontWeight: 'bold',
-                fontSize: '13px',
-                padding: '10px 20px',
-                borderRadius: '10px',
-                border: 'none',
-                cursor: 'pointer'
-              }}
-            >
-              Recargar Aplicación
-            </button>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => this.setState({ hasError: false, error: null })}
+                style={{
+                  backgroundColor: '#383838',
+                  color: '#fff',
+                  fontWeight: 'bold',
+                  fontSize: '13px',
+                  padding: '10px 18px',
+                  borderRadius: '10px',
+                  border: '1px solid #555',
+                  cursor: 'pointer'
+                }}
+              >
+                Volver a la App
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                style={{
+                  backgroundColor: '#f0a144',
+                  color: '#111',
+                  fontWeight: 'bold',
+                  fontSize: '13px',
+                  padding: '10px 18px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  cursor: 'pointer'
+                }}
+              >
+                Recargar Aplicación
+              </button>
+            </div>
           </div>
         </div>
       );

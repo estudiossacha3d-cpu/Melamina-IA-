@@ -5,30 +5,36 @@ import {
   PanelLeftClose, PanelLeftOpen, X, ArrowRight, Sparkles, CheckCircle2,
   Maximize2, Eye, LayoutGrid, List, Weight,
   ChevronLeft, ChevronRight, Filter,
-  GripHorizontal, PanelRight, ChevronDown, ChevronUp, RotateCcw, FolderPlus, Check
+  GripHorizontal, PanelRight, ChevronDown, ChevronUp, RotateCcw, FolderPlus, Check, Star, Sliders,
+  Scissors, ExternalLink
 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
-import { FurnitureCatalogItem, Piece, Group3D } from '../types';
-import { DEFAULT_FURNITURE_CATEGORIES } from '../data/defaultFurniture';
+import { DynamicFurnitureItem, Piece, Group3D } from '../types';
+import { DEFAULT_FURNITURE_CATEGORIES, DEFAULT_FURNITURE_CATALOG } from '../data/defaultFurniture';
 import Warehouse3DPreview from './Warehouse3DPreview';
 import { getFurnitureEffectivePieces, calculateFurnitureMetrics } from '../lib/furnitureHelpers';
 import { useDraggableWindow } from '../hooks/useDraggableWindow';
-import { loadWarehouseCatalog, saveWarehouseCatalog } from '../lib/warehouseStorage';
 
 interface FurnitureWarehouseProps {
   currentPieces: Piece[];
   groups?: Group3D[];
   selectedPieceIds?: string[];
-  onLoadFurnitureTo3D: (furniture: FurnitureCatalogItem, mode?: 'replace' | 'insert') => void;
-  onSaveCurrent3DAsFurniture?: (furnitureData: Partial<FurnitureCatalogItem>) => void;
+  onLoadFurnitureTo3D: (furniture: DynamicFurnitureItem, mode?: 'replace' | 'insert') => void;
+  onSaveCurrent3DAsFurniture?: (furnitureData: Partial<DynamicFurnitureItem>) => void;
+  onOpenDynamicShelf?: (initialItem?: DynamicFurnitureItem) => void;
+  onOpenCutPlan?: (pieces: Piece[]) => void;
   onClose?: () => void;
 }
+
+const STORAGE_KEY = 'ia_mueble_almacen_v2';
 
 export default function FurnitureWarehouse({
   currentPieces,
   groups = [],
   selectedPieceIds = [],
   onLoadFurnitureTo3D,
+  onOpenDynamicShelf,
+  onOpenCutPlan,
   onClose
 }: FurnitureWarehouseProps) {
   // Interactive Floating Category Tray state
@@ -67,10 +73,40 @@ export default function FurnitureWarehouse({
   // View Mode: 'grid' vs 'list'
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
 
-  // Load furniture items from localStorage (starts empty so user can upload their own 3D models)
-  const [catalog, setCatalog] = useState<FurnitureCatalogItem[]>(() => (
-    typeof window === 'undefined' ? [] : loadWarehouseCatalog(window.localStorage)
-  ));
+  // Load furniture items from localStorage or fallback to default catalog
+  const [catalog, setCatalog] = useState<DynamicFurnitureItem[]>(() => {
+    try {
+      localStorage.removeItem('ia_mueble_almacen_dinamico_v1');
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // If DEFAULT_FURNITURE_CATALOG has items not yet in parsed, merge them
+          if (DEFAULT_FURNITURE_CATALOG.length > 0) {
+            const existingIds = new Set(parsed.map((x: DynamicFurnitureItem) => x.id));
+            const missingDefaults = DEFAULT_FURNITURE_CATALOG.filter(d => !existingIds.has(d.id));
+            const updated = parsed.map((x: DynamicFurnitureItem) => {
+              const def = DEFAULT_FURNITURE_CATALOG.find(d => d.id === x.id);
+              if (def) {
+                return { ...def, ...x, pieces: def.pieces, dynamicShelfConfig: def.dynamicShelfConfig };
+              }
+              return x;
+            });
+            if (missingDefaults.length > 0) {
+              return [...missingDefaults, ...updated];
+            }
+            return updated;
+          }
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('Error loading furniture warehouse from storage:', e);
+    }
+    return DEFAULT_FURNITURE_CATALOG;
+  });
+
+  const [isSavingDefault, setIsSavingDefault] = useState(false);
 
   // Custom categories
   const [categories, setCategories] = useState<string[]>(() => {
@@ -82,6 +118,19 @@ export default function FurnitureWarehouse({
     });
     return defaultCats;
   });
+
+  // Auto-sync warehouse items to server default file if items exist
+  React.useEffect(() => {
+    if (catalog.length > 0) {
+      fetch('/api/save-default-warehouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ catalog, categories })
+      }).catch(err => {
+        console.warn('Auto-save to default file failed:', err);
+      });
+    }
+  }, [catalog, categories]);
 
   const [selectedCategory, setSelectedCategory] = useState<string>('Todas');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -142,13 +191,13 @@ export default function FurnitureWarehouse({
   }, [categories, categoryFilterQuery]);
 
   // Interactive 3D Inspector Modal
-  const [inspectingFurniture, setInspectingFurniture] = useState<FurnitureCatalogItem | null>(null);
+  const [inspectingFurniture, setInspectingFurniture] = useState<DynamicFurnitureItem | null>(null);
   const [inspectExplode, setInspectExplode] = useState<number>(0);
   const [inspectHighlightedPieceId, setInspectHighlightedPieceId] = useState<string | null>(null);
 
   // Creation / Editing Modal
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<FurnitureCatalogItem | null>(null);
+  const [editingItem, setEditingItem] = useState<DynamicFurnitureItem | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
 
@@ -159,7 +208,7 @@ export default function FurnitureWarehouse({
   // Form state
   const [formData, setFormData] = useState({
     name: '',
-    category: 'Estantes',
+    category: 'Cocina',
     newCustomCategory: '',
     subcategory: '',
     description: '',
@@ -172,12 +221,45 @@ export default function FurnitureWarehouse({
     attachCurrent3D: true
   });
 
-  const saveCatalog = (newCatalog: FurnitureCatalogItem[]) => {
+  const saveCatalog = (newCatalog: DynamicFurnitureItem[]) => {
     setCatalog(newCatalog);
     try {
-      saveWarehouseCatalog(localStorage, newCatalog);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(newCatalog));
     } catch (err) {
       console.error('Error saving warehouse catalog to localStorage:', err);
+    }
+    // Auto-sync with server default catalog file
+    if (newCatalog.length > 0) {
+      fetch('/api/save-default-warehouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ catalog: newCatalog, categories })
+      }).catch(err => console.warn('Could not sync default warehouse to server:', err));
+    }
+  };
+
+  const handleSaveAsDefault = async () => {
+    if (catalog.length === 0) {
+      showToast('El almacén está vacío. Agrega o crea muebles primero.');
+      return;
+    }
+    setIsSavingDefault(true);
+    try {
+      const res = await fetch('/api/save-default-warehouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ catalog, categories })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`⭐ ¡Almacén guardado por defecto en la app! (${catalog.length} muebles guardados)`);
+      } else {
+        showToast(`Error al guardar: ${data.error || 'Intenta de nuevo'}`);
+      }
+    } catch (err: any) {
+      showToast(`Error al conectar con el servidor: ${err.message}`);
+    } finally {
+      setIsSavingDefault(false);
     }
   };
 
@@ -235,7 +317,7 @@ export default function FurnitureWarehouse({
     setIsCreateModalOpen(true);
   };
 
-  const handleOpenEditModal = (item: FurnitureCatalogItem) => {
+  const handleOpenEditModal = (item: DynamicFurnitureItem) => {
     setEditingItem(item);
     setFormData({
       name: item.name,
@@ -298,7 +380,7 @@ export default function FurnitureWarehouse({
     } else {
       const piecesToSave: Piece[] = JSON.parse(JSON.stringify(getPiecesToSaveFrom3D()));
 
-      const newItem: FurnitureCatalogItem = {
+      const newItem: DynamicFurnitureItem = {
         id: `furn-${uuidv4().substring(0, 8)}`,
         name: formData.name.trim(),
         category: finalCategory,
@@ -316,6 +398,11 @@ export default function FurnitureWarehouse({
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         notes: formData.notes.trim() || undefined,
+        dynamicParameters: [
+          { id: 'p_w', name: 'ancho', label: 'Ancho Total', type: 'dimension', defaultValue: Number(formData.width) || 800, unit: 'mm' },
+          { id: 'p_h', name: 'alto', label: 'Alto Total', type: 'dimension', defaultValue: Number(formData.height) || 750, unit: 'mm' },
+          { id: 'p_d', name: 'profundidad', label: 'Profundidad', type: 'dimension', defaultValue: Number(formData.depth) || 550, unit: 'mm' }
+        ]
       };
 
       saveCatalog([newItem, ...catalog]);
@@ -336,8 +423,8 @@ export default function FurnitureWarehouse({
     showToast('Mueble eliminado del almacén.');
   };
 
-  const handleDuplicate = (item: FurnitureCatalogItem) => {
-    const duplicated: FurnitureCatalogItem = {
+  const handleDuplicate = (item: DynamicFurnitureItem) => {
+    const duplicated: DynamicFurnitureItem = {
       ...item,
       id: `furn-${uuidv4().substring(0, 8)}`,
       name: `${item.name} (Copia)`,
@@ -370,7 +457,7 @@ export default function FurnitureWarehouse({
         if (Array.isArray(parsed) && parsed.length > 0) {
           saveCatalog(parsed);
           const newCats = [...DEFAULT_FURNITURE_CATEGORIES];
-          parsed.forEach((item: FurnitureCatalogItem) => {
+          parsed.forEach((item: DynamicFurnitureItem) => {
             if (item.category && !newCats.includes(item.category)) {
               newCats.push(item.category);
             }
@@ -488,6 +575,20 @@ export default function FurnitureWarehouse({
             <Plus className="w-3 h-3 text-[#f0a144] shrink-0" />
             <span className="hidden sm:inline">Nuevo</span>
           </button>
+
+          {/* Botón Componente Dinámico: Estantes Paramétricos */}
+          {onOpenDynamicShelf && (
+            <button
+              type="button"
+              onClick={() => onOpenDynamicShelf()}
+              className="flex items-center gap-1 px-1.5 py-1 sm:px-2.5 sm:py-1.5 bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 hover:border-sky-500 rounded-lg text-[10px] sm:text-xs font-bold transition-all cursor-pointer shrink-0 shadow-xs"
+              title="Diseñador de Estantes Dinámicos: transforma repisas, divisiones intermedias y dimensiones"
+            >
+              <Sliders className="w-3 h-3 text-sky-400 shrink-0" />
+              <span className="hidden sm:inline">Estante Dinámico</span>
+              <span className="sm:hidden">Dinámico</span>
+            </button>
+          )}
 
           {/* Tools */}
           <div className="flex items-center gap-0.5 bg-[#1b1c26] p-0.5 rounded-lg border border-[#2b2e3d] shrink-0">
@@ -1004,6 +1105,11 @@ export default function FurnitureWarehouse({
                             <span className="font-mono truncate">{item.dimensions.width}×{item.dimensions.height}×{item.dimensions.depth}mm</span>
                             <span aria-hidden="true">·</span>
                             <span className="font-mono shrink-0">e:{item.thickness || 18}</span>
+                            {(item.category === 'Estantes' || item.tags?.some(t => t.toLowerCase().includes('modular') || t.toLowerCase().includes('dinámico') || t.toLowerCase().includes('paramétrico'))) && (
+                              <span className="ml-auto text-[8.5px] font-bold text-sky-400 bg-sky-500/15 px-1 rounded border border-sky-500/30 shrink-0">
+                                Dinámico
+                              </span>
+                            )}
                           </div>
 
                           <h3 
@@ -1027,24 +1133,48 @@ export default function FurnitureWarehouse({
 
                         {/* Bottom Actions */}
                         <div className="flex items-center gap-1.5 pt-2 border-t border-[#222533] w-full max-w-full">
-                          <button
-                            type="button"
-                            onClick={() => onLoadFurnitureTo3D(item, 'replace')}
-                            className="flex-1 py-1.5 px-2 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer shadow-xs truncate"
-                            title="Cargar este mueble en el 3D Viewport"
-                          >
-                            <span>Cargar 3D</span>
-                            <ArrowRight className="w-3.5 h-3.5 shrink-0" />
-                          </button>
+                          {currentPieces && currentPieces.length > 0 ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => onLoadFurnitureTo3D(item, 'insert')}
+                                className="flex-1 py-1.5 px-2 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer shadow-xs truncate"
+                                title="Añadir a la escena 3D al lado del mueble actual (conserva ambos)"
+                              >
+                                <Plus className="w-3.5 h-3.5 stroke-[3] shrink-0" />
+                                <span>+ Añadir 3D</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onLoadFurnitureTo3D(item, 'replace')}
+                                className="py-1.5 px-2 bg-[#222533] hover:bg-[#2c3042] text-gray-400 hover:text-white border border-[#323648] rounded-lg text-[10px] font-bold transition-all cursor-pointer shrink-0"
+                                title="Reemplazar escena actual por este mueble"
+                              >
+                                Reemplazar
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => onLoadFurnitureTo3D(item, 'replace')}
+                              className="flex-1 py-1.5 px-2 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer shadow-xs truncate"
+                              title="Cargar este mueble en el 3D Viewport"
+                            >
+                              <span>Cargar 3D</span>
+                              <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+                            </button>
+                          )}
 
-                          <button
-                            type="button"
-                            onClick={() => onLoadFurnitureTo3D(item, 'insert')}
-                            className="py-1.5 px-2.5 bg-[#222533] hover:bg-[#2c3042] text-gray-300 hover:text-white border border-[#323648] rounded-lg text-xs font-bold transition-all cursor-pointer shrink-0"
-                            title="Añadir como nuevo grupo al lado del mueble actual"
-                          >
-                            + Grupo
-                          </button>
+                          {onOpenCutPlan && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenCutPlan(effectivePieces)}
+                              className="p-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30 hover:border-emerald-500 rounded-lg cursor-pointer shrink-0 transition-colors"
+                              title="Despiece y Plano 2D: Abrir demanda y gráficos de corte para este mueble"
+                            >
+                              <Scissors className="w-3.5 h-3.5" />
+                            </button>
+                          )}
 
                           <button
                             type="button"
@@ -1167,26 +1297,57 @@ export default function FurnitureWarehouse({
               </div>
 
               <div className="flex items-center gap-1 sm:gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    onLoadFurnitureTo3D(inspectingFurniture, 'insert');
-                    setInspectingFurniture(null);
-                  }}
-                  className="px-2.5 sm:px-3 py-1 sm:py-1.5 bg-[#252838] hover:bg-[#32364a] text-gray-200 border border-[#35394d] rounded-lg sm:rounded-xl text-[10.5px] sm:text-xs font-bold transition-all cursor-pointer"
-                >
-                  + Grupo
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onLoadFurnitureTo3D(inspectingFurniture, 'replace');
-                    setInspectingFurniture(null);
-                  }}
-                  className="px-3 sm:px-3.5 py-1 sm:py-1.5 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg sm:rounded-xl text-[10.5px] sm:text-xs transition-all shadow-xs cursor-pointer"
-                >
-                  Cargar 3D
-                </button>
+                {onOpenDynamicShelf && (inspectingFurniture.category === 'Estantes' || inspectingFurniture.tags?.some(t => t.toLowerCase().includes('modular') || t.toLowerCase().includes('dinámico') || t.toLowerCase().includes('paramétrico'))) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const itemToTransform = inspectingFurniture;
+                      setInspectingFurniture(null);
+                      onOpenDynamicShelf(itemToTransform);
+                    }}
+                    className="px-2.5 sm:px-3 py-1 sm:py-1.5 bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 hover:border-sky-500 rounded-lg sm:rounded-xl text-[10.5px] sm:text-xs font-bold transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                    title="Abrir como componente dinámico para cambiar repisas, divisiones o medidas"
+                  >
+                    <Sliders className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Transformar</span>
+                  </button>
+                )}
+                {currentPieces && currentPieces.length > 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onLoadFurnitureTo3D(inspectingFurniture, 'insert');
+                        setInspectingFurniture(null);
+                      }}
+                      className="px-3 sm:px-3.5 py-1 sm:py-1.5 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg sm:rounded-xl text-[10.5px] sm:text-xs transition-all shadow-xs cursor-pointer flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                      <span>+ Añadir a Escena 3D</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onLoadFurnitureTo3D(inspectingFurniture, 'replace');
+                        setInspectingFurniture(null);
+                      }}
+                      className="px-2.5 sm:px-3 py-1 sm:py-1.5 bg-[#252838] hover:bg-[#32364a] text-gray-300 hover:text-white border border-[#35394d] rounded-lg sm:rounded-xl text-[10.5px] sm:text-xs font-bold transition-all cursor-pointer"
+                    >
+                      Reemplazar
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onLoadFurnitureTo3D(inspectingFurniture, 'replace');
+                      setInspectingFurniture(null);
+                    }}
+                    className="px-3 sm:px-3.5 py-1 sm:py-1.5 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-lg sm:rounded-xl text-[10.5px] sm:text-xs transition-all shadow-xs cursor-pointer"
+                  >
+                    Cargar 3D
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setInspectingFurniture(null)}
@@ -1220,9 +1381,26 @@ export default function FurnitureWarehouse({
                   <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
                     <Layers className="w-3 h-3 text-[#f0a144]" /> Despiece de Placas
                   </h4>
-                  <span className="text-[10px] font-mono text-gray-400">
-                    {getFurnitureEffectivePieces(inspectingFurniture).length} placas
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-mono text-gray-400">
+                      {getFurnitureEffectivePieces(inspectingFurniture).length} placas
+                    </span>
+                    {onOpenCutPlan && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const eff = getFurnitureEffectivePieces(inspectingFurniture);
+                          setInspectingFurniture(null);
+                          onOpenCutPlan(eff);
+                        }}
+                        className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[9.5px] font-bold flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
+                        title="Abrir este despiece en el plano de cortes 2D"
+                      >
+                        <Scissors className="w-2.5 h-2.5" />
+                        <span>Plano 2D</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex-1 p-2 sm:p-2.5 overflow-y-auto space-y-1.5">

@@ -578,11 +578,28 @@ export const FredoScaleGizmo: React.FC<FredoScaleGizmoProps> = ({
 
       {/* 6. Positive End Gizmo Handle */}
       <group position={posHandlePos}>
+        {/* X-Ray Pass (always visible through boards) */}
+        <mesh
+          scale={hoveredHandle === 'pos' ? 1.35 : 1.0}
+          renderOrder={998}
+        >
+          <boxGeometry args={[0.035, 0.035, 0.035]} />
+          <meshBasicMaterial
+            color={isPosAnchor ? '#3b82f6' : isCenterMode ? '#22d3ee' : '#ef4444'}
+            transparent
+            opacity={hoveredHandle === 'pos' ? 0.95 : 0.65}
+            depthTest={false}
+            depthWrite={false}
+          />
+        </mesh>
+
+        {/* Solid Shaded Pass */}
         <mesh
           onPointerDown={(e) => handleStartDrag(e, 'pos')}
           onPointerOver={() => setHoveredHandle('pos')}
           onPointerOut={() => setHoveredHandle(null)}
           scale={hoveredHandle === 'pos' ? 1.35 : 1.0}
+          renderOrder={1000}
         >
           <boxGeometry args={[0.035, 0.035, 0.035]} />
           <meshStandardMaterial
@@ -597,11 +614,28 @@ export const FredoScaleGizmo: React.FC<FredoScaleGizmoProps> = ({
 
       {/* 7. Negative End Gizmo Handle */}
       <group position={negHandlePos}>
+        {/* X-Ray Pass (always visible through boards) */}
+        <mesh
+          scale={hoveredHandle === 'neg' ? 1.35 : 1.0}
+          renderOrder={998}
+        >
+          <boxGeometry args={[0.035, 0.035, 0.035]} />
+          <meshBasicMaterial
+            color={isNegAnchor ? '#3b82f6' : isCenterMode ? '#22d3ee' : '#ffffff'}
+            transparent
+            opacity={hoveredHandle === 'neg' ? 0.95 : 0.65}
+            depthTest={false}
+            depthWrite={false}
+          />
+        </mesh>
+
+        {/* Solid Shaded Pass */}
         <mesh
           onPointerDown={(e) => handleStartDrag(e, 'neg')}
           onPointerOver={() => setHoveredHandle('neg')}
           onPointerOut={() => setHoveredHandle(null)}
           scale={hoveredHandle === 'neg' ? 1.35 : 1.0}
+          renderOrder={1000}
         >
           <boxGeometry args={[0.035, 0.035, 0.035]} />
           <meshStandardMaterial

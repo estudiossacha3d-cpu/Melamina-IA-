@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronRight, ChevronLeft, PanelRight, Ruler, Package, Sliders, RotateCcw, RotateCw, FileSpreadsheet, FileText, Check, Copy, ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Move, Expand, CornerDownLeft, Palette, Image as ImageIcon, Eye, EyeOff, GripHorizontal, Maximize2 } from 'lucide-react';
+import { Upload, Save, FolderOpen, Box, Download, Settings, Loader2, Menu, X, Plus, Trash2, Combine, Ungroup, Layers, Search, Filter, Lightbulb, ChevronDown, ChevronUp, ChevronRight, ChevronLeft, PanelRight, Ruler, Package, Sliders, RotateCcw, RotateCw, FileSpreadsheet, FileText, Check, Copy, ArrowUp, ArrowDown, ArrowRight, ArrowLeft, Move, Expand, CornerDownLeft, Palette, Image as ImageIcon, Eye, EyeOff, GripHorizontal, Maximize2, Minimize2 } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
 import { interpretFurnitureImage } from './lib/gemini';
@@ -13,10 +13,14 @@ import FurnitureWarehouse from './components/FurnitureWarehouse';
 import TextureEditorModal from './components/TextureEditorModal';
 import TextureCompactBar from './components/TextureCompactBar';
 import MaterialBrowserModal from './components/MaterialBrowserModal';
-import { calculateSnapToFloorDeltaY } from './lib/geometry3D';
+import { calculateSnapToFloorDeltaY, getGlobalHalfSizes } from './lib/geometry3D';
 import { useDraggableWindow } from './hooks/useDraggableWindow';
 import { DEFAULT_FURNITURE_CATEGORIES, DEFAULT_FURNITURE_CATALOG } from './data/defaultFurniture';
 import { SmartStretchToolbar } from './components/SmartStretchToolbar';
+import { SmartDimensionToolbar } from './components/SmartDimensionToolbar';
+import DynamicShelfModal from './components/DynamicShelfModal';
+import { DynamicShelfConfig } from './lib/dynamicShelfGenerator';
+import { RanuraConfigCard } from './components/RanuraConfigCard';
 
 type ViewMode = '3d' | '2d' | 'warehouse';
 
@@ -33,8 +37,28 @@ function getInitialAppState(): AppState {
     if (saved) {
       const parsed = JSON.parse(saved);
       if (parsed && Array.isArray(parsed.pieces) && parsed.pieces.length > 0) {
+        // Garantizar que en estantes con ranuras, el parante izquierdo y techo miren hacia adentro
+        const migratedPieces = parsed.pieces.map((p: Piece) => {
+          if (p.ranurado && p.ranuraConfig) {
+            const nameLower = (p.name || '').toLowerCase();
+            const idLower = (p.id || '').toLowerCase();
+            if (
+              (nameLower.includes('izquierdo') || idLower.includes('lat-izq')) &&
+              (!p.ranuraConfig.cara || p.ranuraConfig.cara === 'superior')
+            ) {
+              return { ...p, ranuraConfig: { ...p.ranuraConfig, cara: 'inferior' as const } };
+            }
+            if (
+              (nameLower.includes('techo') || idLower.includes('techo-cubierta')) &&
+              (!p.ranuraConfig.cara || p.ranuraConfig.cara === 'superior')
+            ) {
+              return { ...p, ranuraConfig: { ...p.ranuraConfig, cara: 'inferior' as const } };
+            }
+          }
+          return p;
+        });
         return {
-          pieces: parsed.pieces,
+          pieces: migratedPieces,
           groups: Array.isArray(parsed.groups) ? parsed.groups : []
         };
       }
@@ -172,10 +196,13 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('3d');
   const [selectedPieceIds, setSelectedPieceIds] = useState<string[]>([]);
+  const [isBoxSelectActive, setIsBoxSelectActive] = useState<boolean>(false);
+  const [isBoxSelectAdditive, setIsBoxSelectAdditive] = useState<boolean>(false);
   const [editingDimensionsPieceId, setEditingDimensionsPieceId] = useState<string | null>(null);
   const [isTrayOpen, setIsTrayOpen] = useState(() => typeof window !== 'undefined' ? window.innerWidth >= 1024 : true);
   const setMobileMenuOpen = setIsTrayOpen;
   const mobileMenuOpen = isTrayOpen;
+  const [mobileTrayMode, setMobileTrayMode] = useState<'peek' | 'expanded' | 'minimized'>('peek');
 
   const { 
     position: trayPosition, 
@@ -197,15 +224,34 @@ export default function App() {
     minWidth: 190,
     minHeight: 140
   });
-  const [sheetConfig, setSheetConfig] = useState<{ width: number; height: number; kerf: number; margin: number }>({
-    width: 2440,
-    height: 2140,
-    kerf: 3,
-    margin: 10
+  const [sheetConfig, setSheetConfig] = useState<{ width: number; height: number; kerf: number; margin: number }>(() => {
+    try {
+      const saved = localStorage.getItem('iamueble_sheet_config_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed.width === 'number' && typeof parsed.height === 'number') {
+          return parsed;
+        }
+      }
+    } catch {}
+    return {
+      width: 2440,
+      height: 2140,
+      kerf: 3,
+      margin: 10
+    };
   });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('iamueble_sheet_config_v1', JSON.stringify(sheetConfig));
+    } catch {}
+  }, [sheetConfig]);
   const [multiSelectMode, setMultiSelectMode] = useState(false);
   const [transformMode, setTransformMode] = useState<'translate' | 'rotate' | 'scale' | 'texture' | 'stretch'>('translate');
-  const [snapActive, setSnapActive] = useState(true);
+  const [floorSnapActive, setFloorSnapActive] = useState(true);
+  const [pieceSnapActive, setPieceSnapActive] = useState(true);
+  const snapActive = floorSnapActive || pieceSnapActive;
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
 
   // FredoScale Box Stretch state (estirar sin deformar espesor)
@@ -217,12 +263,19 @@ export default function App() {
   const [didacticGuideOpen, setDidacticGuideOpen] = useState(false);
   const [activeDisplacement, setActiveDisplacement] = useState<{ dx: number; dy: number; dz: number; dist: number; isDragging?: boolean; isFloorSnapped?: boolean } | null>(null);
   const [activeRotation, setActiveRotation] = useState<{ dRotX: number; dRotY: number; dRotZ: number; angle: number; axis?: string; isDragging?: boolean } | null>(null);
-  const [activeScaling, setActiveScaling] = useState<{ largo: number; ancho: number; espesor: number; axis?: 'largo' | 'ancho' | 'espesor'; delta?: number; isDragging?: boolean; isSnapped?: boolean; pieceId?: string } | null>(null);
+  const [activeScaling, setActiveScaling] = useState<{ largo: number; ancho: number; espesor: number; axis?: 'largo' | 'ancho' | 'espesor'; delta?: number; isDragging?: boolean; isSnapped?: boolean; snapLabel?: string; pieceId?: string } | null>(null);
+  const [isDimToolbarClosed, setIsDimToolbarClosed] = useState<boolean>(false);
+  const [isStretchToolbarClosed, setIsStretchToolbarClosed] = useState<boolean>(false);
   
   // Custom texture editor state
   const [textureEditingPieceId, setTextureEditingPieceId] = useState<string | null>(null);
   const [isTextureModalOpen, setIsTextureModalOpen] = useState<boolean>(false);
   const [activeTextureFace, setActiveTextureFace] = useState<PieceFaceKey | 'all'>('all');
+
+  // Dynamic Shelf Generator state
+  const [isDynamicShelfModalOpen, setIsDynamicShelfModalOpen] = useState<boolean>(false);
+  const [dynamicShelfConfig, setDynamicShelfConfig] = useState<Partial<DynamicShelfConfig> | undefined>(undefined);
+  const [dynamicShelfItemName, setDynamicShelfItemName] = useState<string | undefined>(undefined);
 
   const handleOpenTextureEditor = (pieceId?: string, faceKey?: PieceFaceKey) => {
     let targetId = pieceId;
@@ -271,6 +324,9 @@ export default function App() {
       if (animId === null) {
         animId = requestAnimationFrame(() => {
           setActiveScaling(pendingScale);
+          if (pendingScale?.axis && (pendingScale.axis === 'largo' || pendingScale.axis === 'ancho' || pendingScale.axis === 'espesor')) {
+            setFooterScaleAxis(pendingScale.axis);
+          }
           animId = null;
         });
       }
@@ -337,6 +393,14 @@ export default function App() {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
   };
+
+  useEffect(() => {
+    const handleToast = (e: any) => {
+      if (e?.detail) showToast(String(e.detail));
+    };
+    window.addEventListener('show-toast', handleToast);
+    return () => window.removeEventListener('show-toast', handleToast);
+  }, []);
 
   // Footer Movement & Rotation Controls (Start from zero on every movement / rotation)
   const [footerMoveDist, setFooterMoveDist] = useState<string>('');
@@ -497,6 +561,34 @@ export default function App() {
     handleApplyDisplacementOffset(0, deltaY, 0);
     showToast(`Apoyada en el suelo: cota Y ajustada (${deltaY > 0 ? '+' : ''}${deltaY} mm)`);
   }, [selectedPieceIds, pieces, handleApplyDisplacementOffset]);
+
+  const handleToggleSnap = useCallback(() => {
+    if (floorSnapActive || pieceSnapActive) {
+      setFloorSnapActive(false);
+      setPieceSnapActive(false);
+      showToast("Magnetismo desactivado");
+    } else {
+      setFloorSnapActive(true);
+      setPieceSnapActive(true);
+      showToast("Magnetismo activado (Piezas y Suelo)");
+    }
+  }, [floorSnapActive, pieceSnapActive]);
+
+  const handleToggleFloorSnap = useCallback(() => {
+    setFloorSnapActive(prev => {
+      const next = !prev;
+      showToast(`Magnetismo de suelo ${next ? 'activado' : 'desactivado'}`);
+      return next;
+    });
+  }, []);
+
+  const handleTogglePieceSnap = useCallback(() => {
+    setPieceSnapActive(prev => {
+      const next = !prev;
+      showToast(`Magnetismo de piezas ${next ? 'activado' : 'desactivado'}`);
+      return next;
+    });
+  }, []);
 
   const toggleTray = (key: keyof typeof trayOpen) => {
     setTrayOpen(prev => ({ ...prev, [key]: !prev[key] }));
@@ -708,31 +800,23 @@ export default function App() {
     }
   };
 
-  const handleLongPressPiece = (pieceId: string) => {
-    setMultiSelectMode(true);
-    const piece = pieces.find(p => p.id === pieceId);
-    if (editingGroupId && piece?.groupId === editingGroupId) {
-      setSelectedPieceIds(prev => Array.from(new Set([...prev, pieceId])));
-      if (typeof navigator !== 'undefined' && navigator.vibrate) {
-        navigator.vibrate([40, 50, 40]);
-      }
-      return;
-    }
-    const pieceGroupId = piece?.groupId;
-    const idsToSelect = pieceGroupId ? pieces.filter(p => p.groupId === pieceGroupId).map(p => p.id) : [pieceId];
+  const handleSelectAllPieces = useCallback(() => {
+    const visibleIds = pieces.filter(p => !p.hidden).map(p => p.id);
+    setSelectedPieceIds(visibleIds);
+    showToast(`Se seleccionaron todas las piezas (${visibleIds.length})`);
+  }, [pieces, showToast]);
 
-    setSelectedPieceIds(prev => {
-      const next = new Set(prev);
-      idsToSelect.forEach(id => next.add(id));
-      return Array.from(next);
-    });
+  const handleClearSelection = useCallback(() => {
+    setSelectedPieceIds([]);
+    showToast('Selección desmarcada');
+  }, [showToast]);
 
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      navigator.vibrate([40, 50, 40]);
-    }
-
-    showToast('¡Selección múltiple activada! Toca más piezas y presiona Agrupar');
-  };
+  const handleInvertSelection = useCallback(() => {
+    const visible = pieces.filter(p => !p.hidden);
+    const inverted = visible.filter(p => !selectedPieceIds.includes(p.id)).map(p => p.id);
+    setSelectedPieceIds(inverted);
+    showToast(`Selección invertida (${inverted.length} piezas)`);
+  }, [pieces, selectedPieceIds, showToast]);
 
   const updateMultiplePiecesTransform = useCallback((updates: { id: string; position: [number, number, number]; rotation: [number, number, number] }[]) => {
     setPieces(prev => {
@@ -832,8 +916,16 @@ export default function App() {
 
   const deletePiece = useCallback((id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
+    let deletedCount = 1;
     setAppState(prev => {
-      const nextPieces = prev.pieces.filter(p => p.id !== id);
+      const targetPiece = prev.pieces.find(p => p.id === id);
+      const isGroupedAndNotInner = targetPiece?.groupId && (!editingGroupId || editingGroupId !== targetPiece.groupId);
+      const idsToDelete = isGroupedAndNotInner
+        ? prev.pieces.filter(p => p.groupId === targetPiece.groupId).map(p => p.id)
+        : [id];
+      deletedCount = idsToDelete.length;
+      const idsSet = new Set(idsToDelete);
+      const nextPieces = prev.pieces.filter(p => !idsSet.has(p.id));
       const usedGroupIds = new Set(nextPieces.map(p => p.groupId).filter(Boolean));
       return {
         ...prev,
@@ -841,15 +933,23 @@ export default function App() {
         groups: prev.groups.filter(g => usedGroupIds.has(g.id))
       };
     });
-    setSelectedPieceIds(prev => prev.filter(p => p !== id));
-    showToast('Pieza eliminada');
-  }, [setAppState]);
+    setSelectedPieceIds(prev => prev.filter(p => p !== id && (!pieces.find(x => x.id === p)?.groupId || pieces.find(x => x.id === p)?.groupId !== pieces.find(x => x.id === id)?.groupId)));
+    showToast(deletedCount > 1 ? `Grupo eliminado (${deletedCount} piezas)` : 'Pieza eliminada');
+  }, [editingGroupId, pieces, setAppState]);
 
   const deleteSelectedPieces = useCallback(() => {
     if (selectedPieceIds.length === 0) return;
-    const count = selectedPieceIds.length;
+    let totalCount = 0;
     setAppState(prev => {
-      const nextPieces = prev.pieces.filter(p => !selectedPieceIds.includes(p.id));
+      const idsSet = new Set(selectedPieceIds);
+      // Incluir también todas las piezas de los grupos seleccionados (si no estamos editando dentro del grupo)
+      prev.pieces.forEach(p => {
+        if (p.groupId && selectedPieceIds.includes(p.id) && (!editingGroupId || editingGroupId !== p.groupId)) {
+          prev.pieces.filter(other => other.groupId === p.groupId).forEach(other => idsSet.add(other.id));
+        }
+      });
+      totalCount = idsSet.size;
+      const nextPieces = prev.pieces.filter(p => !idsSet.has(p.id));
       const usedGroupIds = new Set(nextPieces.map(p => p.groupId).filter(Boolean));
       return {
         ...prev,
@@ -858,8 +958,8 @@ export default function App() {
       };
     });
     setSelectedPieceIds([]);
-    showToast(count === 1 ? 'Pieza eliminada' : `${count} piezas eliminadas`);
-  }, [selectedPieceIds, setAppState]);
+    showToast(totalCount > 1 ? `${totalCount} piezas eliminadas` : 'Pieza eliminada');
+  }, [selectedPieceIds, editingGroupId, setAppState]);
 
   const deleteGroup = useCallback((groupId: string) => {
     setAppState(prev => ({
@@ -910,7 +1010,8 @@ export default function App() {
       const groupsMap: { [key: string]: Piece } = {};
       prev.forEach(p => {
         const c = p.cantos || { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' };
-        const key = `${Math.round(p.largo)}-${Math.round(p.ancho)}-${p.espesor}-${c.largo1}-${c.largo2}-${c.ancho1}-${c.ancho2}-${p.veta}-${p.ranurado}`;
+        const isTransversal = Boolean(p.veta && (p.vetaOrientacion === 'transversal' || p.vetaRotation === 90 || p.vetaRotation === 270));
+        const key = `${Math.round(p.largo)}-${Math.round(p.ancho)}-${p.espesor}-${c.largo1}-${c.largo2}-${c.ancho1}-${c.ancho2}-${p.veta ? (isTransversal ? 'v90' : 'v0') : 'nov'}-${p.ranurado}`;
         if (groupsMap[key]) {
           groupsMap[key].cantidad += p.cantidad;
         } else {
@@ -986,9 +1087,9 @@ export default function App() {
     let localShift = new THREE.Vector3(0, 0, 0);
     if (!isSymmetric) {
       localShift = new THREE.Vector3(
-        (sign * (dLargo / 2)) * 0.001,
-        (sign * (dEspesor / 2)) * 0.001,
-        (sign * (dAncho / 2)) * 0.001
+        sign * (dLargo / 2),
+        sign * (dEspesor / 2),
+        sign * (dAncho / 2)
       );
       const euler = new THREE.Euler(selectedPiece.rotation3D[0], selectedPiece.rotation3D[1], selectedPiece.rotation3D[2], 'XYZ');
       localShift.applyEuler(euler);
@@ -1011,6 +1112,63 @@ export default function App() {
     const finalVal = targetAxis === 'largo' ? nuevoLargo : (targetAxis === 'ancho' ? nuevoAncho : nuevoEspesor);
     showToast(`Pieza dimensionada (${axisLabel}): ${finalVal} mm (${delta > 0 ? '+' : ''}${Math.round(delta)} mm)`);
   }, [selectedPieceIds, footerScaleInput, footerScaleAxis, activeScaling, pieces, anchorMode, dimensionSide, updatePiece]);
+
+  const handleApplyNumericDimension = useCallback((targetOrDeltaMm: number, isAbsolute: boolean = false) => {
+    if (selectedPieceIds.length === 0) {
+      showToast('Selecciona una pieza para dimensionar');
+      return;
+    }
+    const selectedPiece = pieces.find(p => p.id === selectedPieceIds[0]);
+    if (!selectedPiece) return;
+
+    const targetAxis = footerScaleAxis;
+    const currentDim = targetAxis === 'largo' ? selectedPiece.largo : (targetAxis === 'ancho' ? selectedPiece.ancho : selectedPiece.espesor);
+
+    let delta = targetOrDeltaMm;
+    if (isAbsolute) {
+      delta = targetOrDeltaMm - currentDim;
+    }
+
+    if (Math.abs(delta) < 0.01) return;
+
+    const dLargo = targetAxis === 'largo' ? delta : 0;
+    const dAncho = targetAxis === 'ancho' ? delta : 0;
+    const dEspesor = targetAxis === 'espesor' ? delta : 0;
+
+    const nuevoLargo = Math.max(10, Math.round(selectedPiece.largo + dLargo));
+    const nuevoAncho = Math.max(10, Math.round(selectedPiece.ancho + dAncho));
+    const nuevoEspesor = Math.max(1, Math.round(selectedPiece.espesor + dEspesor));
+
+    const isSymmetric = anchorMode === 'center';
+    const sign = dimensionSide === 'neg' ? -1 : 1;
+
+    let localShift = new THREE.Vector3(0, 0, 0);
+    if (!isSymmetric) {
+      localShift = new THREE.Vector3(
+        sign * (dLargo / 2),
+        sign * (dEspesor / 2),
+        sign * (dAncho / 2)
+      );
+      const euler = new THREE.Euler(selectedPiece.rotation3D[0], selectedPiece.rotation3D[1], selectedPiece.rotation3D[2], 'XYZ');
+      localShift.applyEuler(euler);
+    }
+
+    updatePiece(selectedPiece.id, {
+      largo: nuevoLargo,
+      ancho: nuevoAncho,
+      espesor: nuevoEspesor,
+      position3D: [
+        selectedPiece.position3D[0] + localShift.x,
+        selectedPiece.position3D[1] + localShift.y,
+        selectedPiece.position3D[2] + localShift.z
+      ]
+    });
+
+    setActiveScaling(null);
+    const axisLabel = targetAxis === 'largo' ? 'Largo' : (targetAxis === 'ancho' ? 'Ancho' : 'Espesor');
+    const finalVal = targetAxis === 'largo' ? nuevoLargo : (targetAxis === 'ancho' ? nuevoAncho : nuevoEspesor);
+    showToast(`Pieza dimensionada (${axisLabel}): ${finalVal} mm (${delta > 0 ? '+' : ''}${Math.round(delta)} mm)`);
+  }, [selectedPieceIds, pieces, footerScaleAxis, anchorMode, dimensionSide, updatePiece, showToast]);
 
   const updatePieces = (ids: string[], updates: Partial<Piece>) => {
     const idSet = new Set(ids);
@@ -1118,6 +1276,16 @@ export default function App() {
         e.preventDefault();
         setTransformMode(prev => prev === 'stretch' ? 'translate' : 'stretch');
         return;
+      }
+
+      // Enfocar / Acercar a detalle de la pieza seleccionada (Focus): Tecla F
+      if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+        if (activeTag !== 'input' && activeTag !== 'textarea') {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent('focus-selected-piece'));
+          return;
+        }
       }
 
       // Eliminar piezas seleccionadas: Supr / Delete / Backspace
@@ -1302,8 +1470,11 @@ export default function App() {
 
     if (mode === 'insert' && pieces.length > 0) {
       // Offset new pieces to the right so they don't collide with existing furniture
-      const maxX = Math.max(...pieces.map(p => (p.position3D?.[0] || 0) + (p.largo || 0) / 2));
-      const offsetX = maxX + (furniture.dimensions.width / 2) + 200;
+      const maxX = Math.max(...pieces.map(p => {
+        const halfX = getGlobalHalfSizes(p.rotation3D, p.largo, p.espesor, p.ancho).x * 1000;
+        return (p.position3D?.[0] || 0) + halfX;
+      }));
+      const offsetX = Math.round(maxX + (furniture.dimensions.width / 2) + 100);
       const shiftedPieces = piecesToLoad.map(p => ({
         ...p,
         position3D: [p.position3D[0] + offsetX, p.position3D[1], p.position3D[2]] as [number, number, number]
@@ -1338,6 +1509,286 @@ export default function App() {
     }
 
     setViewMode('3d');
+  };
+
+  const handleOpenDynamicShelf = (item?: DynamicFurnitureItem) => {
+    if (item) {
+      setDynamicShelfItemName(item.name);
+
+      // 1. Si el mueble ya tiene guardada su configuración paramétrica completa
+      if ((item as any).dynamicShelfConfig) {
+        setDynamicShelfConfig((item as any).dynamicShelfConfig);
+        setIsDynamicShelfModalOpen(true);
+        return;
+      }
+
+      // 2. Si tiene parámetros dinámicos definidos
+      if (item.dynamicParameters && item.dynamicParameters.length > 0) {
+        const getP = (id: string) => item.dynamicParameters?.find(p => p.id === id)?.defaultValue;
+        const w = Number(getP('totalWidth')) || item.dimensions.width;
+        const h = Number(getP('totalHeight')) || item.dimensions.height;
+        const d = Number(getP('totalDepth')) || item.dimensions.depth;
+        const sc = Number(getP('shelfCount'));
+        const vd = Number(getP('verticalDivisions'));
+        const ds = getP('divisionStyle') as any;
+        const sp = getP('staggerPattern') as any;
+
+        setDynamicShelfConfig({
+          totalWidth: w,
+          totalHeight: h,
+          totalDepth: d,
+          thickness: item.thickness || 18,
+          shelfCount: !isNaN(sc) && sc >= 0 ? sc : 4,
+          verticalDivisions: !isNaN(vd) && vd >= 0 ? vd : 0,
+          divisionStyle: ds || 'continuous_vertical',
+          staggerPattern: sp || 'offset',
+          includePlinth: true,
+          plinthHeight: 80,
+          includeBack: true,
+          material: item.pieces?.[0]?.material || 'Blanco',
+          customColor: item.pieces?.[0]?.customColor || '#ecebe6'
+        });
+        setIsDynamicShelfModalOpen(true);
+        return;
+      }
+
+      // 3. Extracción inteligente analizando las piezas del modelo
+      const repisas = item.pieces?.filter(p => p.name.toLowerCase().includes('repisa')) || [];
+      const distinctShelfY: number[] = [];
+      repisas.forEach(p => {
+        const y = p.position3D?.[1] || 0;
+        if (!distinctShelfY.some(ey => Math.abs(ey - y) < 25)) {
+          distinctShelfY.push(y);
+        }
+      });
+      const detectedShelfCount = distinctShelfY.length > 0 ? distinctShelfY.length : 4;
+
+      const divPieces = item.pieces?.filter(p =>
+        p.name.toLowerCase().includes('divisor') ||
+        p.name.toLowerCase().includes('separador') ||
+        p.name.toLowerCase().includes('casillero') ||
+        p.name.toLowerCase().includes('montante')
+      ) || [];
+
+      let detectedStyle: 'continuous_vertical' | 'continuous_horizontal' | 'staggered' = 'continuous_vertical';
+      let detectedDivCount = 0;
+
+      if (divPieces.some(p => p.name.toLowerCase().includes('casillero') || p.name.toLowerCase().includes('trabado') || p.name.toLowerCase().includes('asym'))) {
+        detectedStyle = 'staggered';
+        detectedDivCount = Math.min(4, Math.max(1, Math.round(divPieces.length / (detectedShelfCount + 1))));
+      } else if (divPieces.some(p => p.name.toLowerCase().includes('separador'))) {
+        detectedStyle = 'continuous_horizontal';
+        detectedDivCount = Math.min(4, Math.max(1, Math.round(divPieces.length / (detectedShelfCount + 1))));
+      } else if (divPieces.length > 0) {
+        detectedStyle = 'continuous_vertical';
+        detectedDivCount = divPieces.length;
+      }
+
+      const hasRanura = item.pieces?.some(p => p.ranurado || (p.name && p.name.toLowerCase().includes('ranurado')));
+      const backPiece = item.pieces?.find(p => p.name.toLowerCase().includes('fondo') || p.name.toLowerCase().includes('respaldo'));
+      const detectedBackT = backPiece?.espesor || 4;
+
+      setDynamicShelfConfig({
+        totalWidth: item.dimensions.width,
+        totalHeight: item.dimensions.height,
+        totalDepth: item.dimensions.depth,
+        thickness: item.thickness || 18,
+        shelfCount: Math.min(10, Math.max(0, detectedShelfCount)),
+        verticalDivisions: detectedDivCount,
+        divisionStyle: detectedStyle,
+        staggerPattern: 'offset',
+        includePlinth: true,
+        plinthHeight: 80,
+        includeBack: true,
+        backType: hasRanura ? 'ranurado' : 'sobrepuesto',
+        backThickness: detectedBackT,
+        backGrooveDist: 18,
+        backGrooveDepth: 8,
+        material: item.pieces?.[0]?.material || 'Blanco',
+        customColor: item.pieces?.[0]?.customColor || '#ecebe6'
+      });
+    } else {
+      if (pieces.length > 0) {
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
+        pieces.forEach(p => {
+          const px = p.position3D?.[0] || 0;
+          const py = p.position3D?.[1] || 0;
+          const pz = p.position3D?.[2] || 0;
+          const halfL = (p.largo || 0) / 2;
+          const halfA = (p.ancho || 0) / 2;
+          const halfE = (p.espesor || 18) / 2;
+          minX = Math.min(minX, px - halfL); maxX = Math.max(maxX, px + halfL);
+          minY = Math.min(minY, py - halfE); maxY = Math.max(maxY, py + halfE);
+          minZ = Math.min(minZ, pz - halfA); maxZ = Math.max(maxZ, pz + halfA);
+        });
+        const w = isFinite(maxX - minX) && (maxX - minX) > 200 ? Math.round(maxX - minX) : 636;
+        const h = isFinite(maxY - minY) && (maxY - minY) > 400 ? Math.round(maxY - minY) : 2100;
+        const d = isFinite(maxZ - minZ) && (maxZ - minZ) > 150 ? Math.round(maxZ - minZ) : 400;
+        const mat = pieces[0]?.material || 'Blanco';
+        const col = pieces[0]?.customColor || '#ecebe6';
+        const thick = pieces[0]?.espesor || 18;
+
+        const repisas = pieces.filter(p => p.name.toLowerCase().includes('repisa'));
+        const distinctShelfY: number[] = [];
+        repisas.forEach(p => {
+          const y = p.position3D?.[1] || 0;
+          if (!distinctShelfY.some(ey => Math.abs(ey - y) < 25)) {
+            distinctShelfY.push(y);
+          }
+        });
+        const repCount = distinctShelfY.length > 0 ? distinctShelfY.length : (repisas.length || 4);
+
+        const hasRanuraInPieces = pieces.some(p => p.ranurado || (p.name && p.name.toLowerCase().includes('ranurado')));
+        const backPieceInScene = pieces.find(p => p.name.toLowerCase().includes('fondo') || p.name.toLowerCase().includes('respaldo'));
+        const detectedBackTInScene = backPieceInScene?.espesor || 4;
+
+        setDynamicShelfItemName('Estante Dinámico');
+        setDynamicShelfConfig({
+          totalWidth: w,
+          totalHeight: h,
+          totalDepth: d,
+          thickness: thick,
+          shelfCount: Math.min(10, Math.max(0, repCount)),
+          verticalDivisions: 0,
+          divisionStyle: 'continuous_vertical',
+          staggerPattern: 'offset',
+          includePlinth: true,
+          plinthHeight: 80,
+          includeBack: true,
+          backType: hasRanuraInPieces ? 'ranurado' : 'sobrepuesto',
+          backThickness: detectedBackTInScene,
+          backGrooveDist: 18,
+          backGrooveDepth: 8,
+          material: mat,
+          customColor: col
+        });
+      } else {
+        setDynamicShelfItemName('Nuevo Estante Modular Paramétrico');
+        setDynamicShelfConfig(undefined);
+      }
+    }
+    setIsDynamicShelfModalOpen(true);
+  };
+
+  const handleApplyDynamicShelf = (generatedPieces: Piece[], mode?: 'replace' | 'insert') => {
+    // Si ya existen piezas en 3D y el usuario no forzó 'replace', añadimos el nuevo componente a la escena
+    const effectiveMode = mode ?? (pieces.length > 0 ? 'insert' : 'replace');
+    const existingGroupsCount = groups.length;
+    const finalGroupName = dynamicShelfItemName 
+      ? (existingGroupsCount > 0 ? `${dynamicShelfItemName} #${existingGroupsCount + 1}` : dynamicShelfItemName)
+      : `Estante Dinámico #${existingGroupsCount + 1}`;
+
+    const newGroupId = uuidv4();
+
+    if (effectiveMode === 'insert' && pieces.length > 0) {
+      // Calcular los límites reales en X de todas las piezas existentes en la escena usando sus dimensiones y rotaciones 3D
+      const existingMaxX = Math.max(
+        ...pieces.map(p => {
+          const halfX = getGlobalHalfSizes(p.rotation3D, p.largo, p.espesor, p.ancho).x * 1000;
+          return (p.position3D?.[0] || 0) + halfX;
+        })
+      );
+
+      // Calcular los límites en X del nuevo componente generado
+      const newHalfXList = generatedPieces.map(p => 
+        getGlobalHalfSizes(p.rotation3D, p.largo, p.espesor, p.ancho).x * 1000
+      );
+      const newMinX = Math.min(...generatedPieces.map((p, i) => (p.position3D?.[0] || 0) - newHalfXList[i]));
+      
+      // Separación limpia de 80 mm para que el segundo componente quede adyacente y perfectamente alineado
+      const gap = 80;
+      const offsetX = Math.round(existingMaxX - newMinX + gap);
+
+      const shifted = generatedPieces.map(p => ({
+        ...p,
+        id: `${newGroupId}-${p.name.replace(/\s+/g, '-').toLowerCase()}-${uuidv4().slice(0, 8)}`,
+        groupId: newGroupId,
+        position3D: [p.position3D[0] + offsetX, p.position3D[1], p.position3D[2]] as [number, number, number]
+      }));
+
+      const newGroup: Group3D = {
+        id: newGroupId,
+        name: finalGroupName,
+        position3D: [offsetX, 0, 0],
+        rotation3D: [0, 0, 0]
+      };
+
+      setAppState(prev => ({
+        pieces: [...prev.pieces, ...shifted],
+        groups: [...prev.groups, newGroup]
+      }));
+      setSelectedPieceIds(shifted.map(p => p.id));
+      showToast(`Componente dinámico "${finalGroupName}" añadido a la escena 3D.`);
+    } else {
+      const newGroup: Group3D = {
+        id: newGroupId,
+        name: finalGroupName,
+        position3D: [0, 0, 0],
+        rotation3D: [0, 0, 0]
+      };
+      const formattedPieces = generatedPieces.map(p => ({
+        ...p,
+        id: `${newGroupId}-${p.name.replace(/\s+/g, '-').toLowerCase()}-${uuidv4().slice(0, 8)}`,
+        groupId: newGroupId
+      }));
+      setAppState({
+        pieces: formattedPieces,
+        groups: [newGroup]
+      });
+      setSelectedPieceIds(formattedPieces.map(p => p.id));
+      showToast(`Mueble dinámico cargado en el visor 3D.`);
+    }
+
+    setViewMode('3d');
+  };
+
+  const handleSaveDynamicShelfToWarehouse = (item: DynamicFurnitureItem) => {
+    try {
+      const STORAGE_KEY = 'ia_mueble_almacen_v2';
+      const saved = localStorage.getItem(STORAGE_KEY);
+      let cat: DynamicFurnitureItem[] = saved ? JSON.parse(saved) : [...DEFAULT_FURNITURE_CATALOG];
+      const existingIdx = cat.findIndex(c => c.id === item.id);
+      if (existingIdx >= 0) {
+        cat[existingIdx] = item;
+      } else {
+        cat = [item, ...cat];
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cat));
+      fetch('/api/save-default-warehouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ catalog: cat })
+      }).catch(() => {});
+      showToast(`"${item.name}" guardado en el almacén`);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSaveDynamicShelfAsAppDefault = async (item: DynamicFurnitureItem): Promise<boolean> => {
+    try {
+      const STORAGE_KEY = 'ia_mueble_almacen_v2';
+      const saved = localStorage.getItem(STORAGE_KEY);
+      let cat: DynamicFurnitureItem[] = saved ? JSON.parse(saved) : [...DEFAULT_FURNITURE_CATALOG];
+      const existingIdx = cat.findIndex(c => c.id === item.id);
+      if (existingIdx >= 0) {
+        cat[existingIdx] = item;
+      } else {
+        cat = [item, ...cat];
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cat));
+
+      const res = await fetch('/api/save-default-warehouse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ catalog: cat })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   };
 
   const executeDistribution = () => {
@@ -1601,6 +2052,12 @@ export default function App() {
              onClick={() => setViewMode(viewMode === 'warehouse' ? '3d' : 'warehouse')} 
              title="Almacén de muebles"
            />
+           <ToolbarIcon 
+             icon={<Sliders />} 
+             active={isDynamicShelfModalOpen} 
+             onClick={() => handleOpenDynamicShelf()} 
+             title="Componente Dinámico: Diseñador de Estantes Paramétricos" 
+           />
            <ToolbarIcon icon={<Plus />} active={false} onClick={addPiece} title="Agregar Pieza" />
            <ToolbarIcon 
              icon={<Trash2 />} 
@@ -1652,6 +2109,12 @@ export default function App() {
                 groups={groups}
                 selectedPieceIds={selectedPieceIds}
                 onLoadFurnitureTo3D={handleLoadFurnitureFromWarehouse}
+                onOpenDynamicShelf={handleOpenDynamicShelf}
+                onOpenCutPlan={(furniturePieces) => {
+                  setPieces(furniturePieces);
+                  setViewMode('2d');
+                  showToast('Cargando despiece en el plano y gráficos 2D...');
+                }}
                 onClose={() => setViewMode('3d')}
               />
             ) : viewMode === '3d' ? (
@@ -1722,6 +2185,8 @@ export default function App() {
                   dimensionSide={dimensionSide}
                   anchorMode={anchorMode}
                   snapActive={snapActive}
+                  floorSnapActive={floorSnapActive}
+                  pieceSnapActive={pieceSnapActive}
                   onDoubleClickPiece={(id) => {
                     const p = pieces.find(x => x.id === id);
                     if (p?.groupId && !editingGroupId) {
@@ -1744,7 +2209,12 @@ export default function App() {
                     setActiveTextureFace(face);
                     setIsTextureModalOpen(true);
                   }}
-                  onLongPressPiece={handleLongPressPiece}
+                  isBoxSelectActive={isBoxSelectActive}
+                  onToggleBoxSelect={() => setIsBoxSelectActive(prev => !prev)}
+                  isBoxSelectAdditive={isBoxSelectAdditive}
+                  onSelectPieceIds={(ids) => setSelectedPieceIds(ids)}
+                  onSelectAllPieces={handleSelectAllPieces}
+                  onClearSelection={handleClearSelection}
                 />
                 <ThreeViewerOverlay 
                   pieces={pieces}
@@ -1752,6 +2222,13 @@ export default function App() {
                   selectedPieceId={selectedPieceIds[0] || null}
                   selectedPieceIds={selectedPieceIds}
                   edgeThicknessConfig={edgeThicknessConfig}
+                  isBoxSelectActive={isBoxSelectActive}
+                  onToggleBoxSelect={() => setIsBoxSelectActive(prev => !prev)}
+                  isBoxSelectAdditive={isBoxSelectAdditive}
+                  onToggleBoxSelectAdditive={() => setIsBoxSelectAdditive(prev => !prev)}
+                  onSelectAllPieces={handleSelectAllPieces}
+                  onClearSelection={handleClearSelection}
+                  onInvertSelection={handleInvertSelection}
                   onSelectPiece={(id) => toggleSelection(id, false)}
                   onSelectPieceIds={(ids) => setSelectedPieceIds(ids)}
                   onAddPiece={addPiece}
@@ -1765,24 +2242,69 @@ export default function App() {
                     showToast(`Se renombraron ${batchUpdates.length} piezas`);
                   }}
                   onDeletePiece={(id) => {
-                     if (id) {
-                       deletePiece(id);
+                     // Si hay múltiples piezas seleccionadas, borrar todas de un solo clic
+                     if (selectedPieceIds.length > 1) {
+                       deleteSelectedPieces();
+                       return;
+                     }
+                     const targetId = id || selectedPieceIds[0];
+                     if (targetId) {
+                       deletePiece(targetId);
                      } else {
                        deleteSelectedPieces();
                      }
                   }}
                   onDuplicatePiece={(id) => {
-                     const p = pieces.find(x => x.id === id);
+                     if (selectedPieceIds.length > 1) {
+                       const sel = pieces.filter(p => selectedPieceIds.includes(p.id));
+                       if (sel.length > 0) {
+                         const groupMapping = new Map<string, string>();
+                         const duplicated = sel.map(p => {
+                           let newGId = undefined;
+                           if (p.groupId) {
+                             if (!groupMapping.has(p.groupId)) {
+                               const freshId = uuidv4();
+                               groupMapping.set(p.groupId, freshId);
+                               const origGroup = groups.find(g => g.id === p.groupId);
+                               setGroups(prev => [...prev, {
+                                 id: freshId,
+                                 name: origGroup ? `${origGroup.name} (Copia)` : 'Grupo (Copia)',
+                                 position3D: origGroup ? [origGroup.position3D[0], origGroup.position3D[1], origGroup.position3D[2]] : [0, 0, 0],
+                                 rotation3D: origGroup ? [origGroup.rotation3D[0], origGroup.rotation3D[1], origGroup.rotation3D[2]] : [0, 0, 0]
+                               }]);
+                             }
+                             newGId = groupMapping.get(p.groupId);
+                           }
+                           return {
+                             ...p,
+                             id: uuidv4(),
+                             groupId: newGId,
+                             position3D: [p.position3D[0] + 40, p.position3D[1], p.position3D[2] + 40] as [number, number, number]
+                           };
+                         });
+                         setPieces(prev => [...prev, ...duplicated]);
+                         setSelectedPieceIds(duplicated.map(d => d.id));
+                         showToast(`Se duplicaron ${duplicated.length} piezas`);
+                         return;
+                       }
+                     }
+                     const targetId = id || selectedPieceIds[0];
+                     const p = pieces.find(x => x.id === targetId);
                      if (p) {
-                        const newPiece = { ...p, id: uuidv4(), position3D: [p.position3D[0], p.position3D[1], p.position3D[2]] as [number, number, number] };
+                        const newPiece = { ...p, id: uuidv4(), position3D: [p.position3D[0] + 40, p.position3D[1], p.position3D[2] + 40] as [number, number, number] };
                         setPieces(prev => [...prev, newPiece]);
                         setSelectedPieceIds([newPiece.id]);
+                        showToast('Pieza duplicada');
                      }
                   }}
                   onGroupPieces={handleGroupPieces}
                   onUngroupPieces={handleUngroupPieces}
                   snapActive={snapActive}
-                  onToggleSnap={() => setSnapActive(!snapActive)}
+                  floorSnapActive={floorSnapActive}
+                  pieceSnapActive={pieceSnapActive}
+                  onToggleSnap={handleToggleSnap}
+                  onToggleFloorSnap={handleToggleFloorSnap}
+                  onTogglePieceSnap={handleTogglePieceSnap}
                   multiSelectMode={multiSelectMode}
                   onToggleMultiSelect={() => setMultiSelectMode(!multiSelectMode)}
                   transformMode={transformMode}
@@ -1798,6 +2320,12 @@ export default function App() {
                       }
                     } else {
                       setIsTextureModalOpen(false);
+                      if (mode === 'scale') {
+                        setIsDimToolbarClosed(false);
+                      }
+                      if (mode === 'stretch') {
+                        setIsStretchToolbarClosed(false);
+                      }
                       setTransformMode(mode);
                     }
                   }}
@@ -2034,9 +2562,12 @@ export default function App() {
                  /* DIMENSIONING MODE (Cuánto moví el gizmo / Medida mm) */
                  <div className="flex items-center gap-1 sm:gap-1.5 font-mono bg-[#141414] px-1.5 sm:px-2 py-0.5 rounded border border-[#f0a144]/60 text-[#f0a144] shrink-0">
                    <span className="w-1.5 h-1.5 rounded-full bg-[#f0a144] shrink-0" />
-                   <span className="font-bold text-[9px] sm:text-[9.5px] flex items-center gap-1 shrink-0">
-                     <span className="hidden sm:inline">MEDIDA:</span>
-                     <span className="sm:hidden">MED:</span>
+                   <span className="sm:hidden font-bold text-[9px] flex items-center gap-1 shrink-0">
+                     <span>DIM:</span>
+                     <span className="text-white font-bold">{footerScaleAxis === "largo" ? "X" : footerScaleAxis === "ancho" ? "Z" : "Y"}</span>
+                   </span>
+                   <span className="hidden sm:flex font-bold text-[9px] sm:text-[9.5px] items-center gap-1 shrink-0">
+                     <span>MEDIDA:</span>
                      <input 
                        type="text"
                        value={
@@ -2110,7 +2641,7 @@ export default function App() {
                          )}
                          {activeScaling.isSnapped && (
                            <span className="text-[#fbbf24] ml-1 font-bold text-[7.5px] bg-[#fbbf24]/15 px-1 py-0.2 rounded border border-[#fbbf24]/30" title="Imán acoplado">
-                             IMÁN
+                             {activeScaling.snapLabel ? `🧲 ${activeScaling.snapLabel.toUpperCase()}` : 'IMÁN'}
                            </span>
                          )}
                        </span>
@@ -2178,48 +2709,110 @@ export default function App() {
           </footer>
         </div>
 
-        {/* Floating Draggable Default Tray (matches catalog window, draggable, compact & interactive) */}
-        {viewMode === '3d' && isTrayOpen && (
-          <div 
-            className="fixed z-40 pointer-events-auto select-none"
-            style={{ left: `${trayPosition.x}px`, top: `${trayPosition.y}px` }}
-            onClick={e => e.stopPropagation()}
-          >
+        {/* Floating Draggable Default Tray (matches catalog window, draggable on desktop, responsive dynamic window on mobile) */}
+        {viewMode === '3d' && isTrayOpen && (() => {
+          const isMobileScreen = typeof window !== 'undefined' && window.innerWidth < 768;
+          return (
             <div 
-              className="bg-[#14151a]/95 backdrop-blur-md border border-[#2d313d] rounded-xl sm:rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden text-gray-200 relative group"
-              style={{ width: `${traySize.width}px`, height: `${traySize.height}px` }}
+              className={`fixed z-40 pointer-events-auto select-none transition-all duration-200 ${
+                isMobileScreen 
+                  ? 'left-2 right-2 bottom-2 max-w-[calc(100vw-16px)]'
+                  : ''
+              }`}
+              style={isMobileScreen ? {
+                height: mobileTrayMode === 'expanded' ? '82vh' : mobileTrayMode === 'peek' ? '46vh' : '44px'
+              } : { 
+                left: `${Math.min(window.innerWidth - 60, Math.max(10, trayPosition.x))}px`, 
+                top: `${Math.min(window.innerHeight - 40, Math.max(35, trayPosition.y))}px` 
+              }}
+              onClick={e => e.stopPropagation()}
             >
-              
-              {/* Header (Draggable handle) */}
               <div 
-                className="h-7 sm:h-8 bg-[#101115] border-b border-[#22242e] flex items-center justify-between px-2 sm:px-2.5 shrink-0 select-none cursor-grab active:cursor-grabbing"
-                {...trayDragProps}
-                title="Arrastrar bandeja predeterminada"
+                className="bg-[#14151a]/95 backdrop-blur-md border border-[#2d313d] rounded-xl sm:rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden text-gray-200 relative group h-full"
+                style={isMobileScreen ? { width: '100%' } : { width: `${traySize.width}px`, height: `${traySize.height}px` }}
               >
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <GripHorizontal className="w-3 h-3 text-gray-500 shrink-0" />
-                  <PanelRight className="w-3.5 h-3.5 text-[#f0a144] shrink-0" />
-                  <span className="text-[9.5px] sm:text-[10px] font-black uppercase text-[#e5e5e5] tracking-wider truncate">
-                    Bandeja
-                  </span>
+                
+                {/* Header (Draggable handle & dynamic window controls) */}
+                <div 
+                  className="h-8 bg-[#101115] border-b border-[#22242e] flex items-center justify-between px-2 sm:px-2.5 shrink-0 select-none cursor-grab active:cursor-grabbing"
+                  {...(!isMobileScreen ? trayDragProps : {})}
+                  onClick={() => {
+                    if (isMobileScreen) {
+                      setMobileTrayMode(prev => prev === 'minimized' ? 'peek' : prev === 'peek' ? 'expanded' : 'minimized');
+                    }
+                  }}
+                  title={isMobileScreen ? "Toca para alternar tamaño de la ventana dinámica" : "Arrastrar bandeja predeterminada"}
+                >
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <GripHorizontal className="w-3 h-3 text-gray-500 shrink-0" />
+                    <PanelRight className="w-3.5 h-3.5 text-[#f0a144] shrink-0" />
+                    <span className="text-[9.5px] sm:text-[10px] font-black uppercase text-[#e5e5e5] tracking-wider truncate">
+                      {isMobileScreen ? 'Ventana Dinámica de Parámetros' : 'Bandeja'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {isMobileScreen && (
+                      <div className="flex items-center gap-1 mr-1">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMobileTrayMode(prev => prev === 'minimized' ? 'peek' : 'minimized');
+                          }}
+                          className={`p-1 rounded text-gray-400 hover:text-white ${mobileTrayMode === 'minimized' ? 'text-[#f0a144]' : ''}`}
+                          title="Minimizar"
+                        >
+                          <Minimize2 className="w-3 h-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMobileTrayMode(prev => prev === 'peek' ? 'expanded' : 'peek');
+                          }}
+                          className={`p-1 rounded text-gray-400 hover:text-white ${mobileTrayMode === 'peek' ? 'text-[#f0a144]' : ''}`}
+                          title="Media pantalla"
+                        >
+                          <ChevronUp className={`w-3 h-3 transition-transform ${mobileTrayMode === 'expanded' ? 'rotate-180' : ''}`} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMobileTrayMode(prev => prev === 'expanded' ? 'peek' : 'expanded');
+                          }}
+                          className={`p-1 rounded text-gray-400 hover:text-white ${mobileTrayMode === 'expanded' ? 'text-[#f0a144]' : ''}`}
+                          title="Pantalla completa"
+                        >
+                          <Maximize2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
+                    <span className="text-[6.5px] sm:text-[7px] text-[#10b981] font-bold bg-[#10b981]/10 px-1 py-0.2 rounded border border-[#10b981]/20 hidden sm:inline">
+                      ACTIVA
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsTrayOpen(false)}
+                      className="text-gray-400 hover:text-white p-0.5 rounded hover:bg-white/10 transition-colors cursor-pointer flex items-center justify-center ml-1"
+                      title="Cerrar ventana"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <span className="text-[6.5px] sm:text-[7px] text-[#10b981] font-bold bg-[#10b981]/10 px-1 py-0.2 rounded border border-[#10b981]/20">
-                    ACTIVA
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsTrayOpen(false)}
-                    className="text-gray-400 hover:text-white p-0.5 rounded hover:bg-white/10 transition-colors cursor-pointer flex items-center justify-center"
-                    title="Cerrar bandeja"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
 
-              {/* Scrollable Trays Area */}
-              <div className="flex-1 overflow-y-auto divide-y divide-[#20222a] bg-[#0d0e12] [scrollbar-width:thin]">
+                {/* Scrollable Trays Area (Or Minimized Quick Bar) */}
+                {isMobileScreen && mobileTrayMode === 'minimized' ? (
+                  <div 
+                    onClick={() => setMobileTrayMode('peek')}
+                    className="flex-1 flex items-center justify-between px-3 cursor-pointer bg-[#0e0f14] text-xs font-mono text-[#f0a144]"
+                  >
+                    <span>{pieces.length} piezas en escena</span>
+                    <span className="flex items-center gap-1 font-bold">Abrir Parámetros <ChevronUp className="w-3 h-3" /></span>
+                  </div>
+                ) : (
+                  <div className="flex-1 overflow-y-auto divide-y divide-[#20222a] bg-[#0d0e12] [scrollbar-width:thin]">
               
               {/* TRAY 1: ESQUEMA (OUTLINER) */}
               <div className="flex flex-col">
@@ -3045,6 +3638,7 @@ export default function App() {
                                       key={edge.key}
                                       label={edge.label}
                                       sub={edge.sub}
+                                      edgeKey={edge.key}
                                       value={val}
                                       gruesoMm={edgeThicknessConfig.grueso}
                                       delgadoMm={edgeThicknessConfig.delgado}
@@ -3239,10 +3833,28 @@ export default function App() {
                                             {activePiece.ranurado ? 'SÍ' : 'NO'}
                                           </span>
                                         </div>
-                                        <span className="text-[7px] text-gray-400 mt-1">Mecanizado</span>
+                                        </div>
                                       </div>
+
+                                      {/* Ranura Config details */}
+                                      {activePiece.ranurado && (
+                                        <div className="mt-1.5 w-full">
+                                          <RanuraConfigCard 
+                                            piece={activePiece} 
+                                            onUpdate={(patch) => updatePiece(activePiece.id, patch)} 
+                                            onToast={showToast}
+                                            compact={true}
+                                            selectedPieces={pieces.filter(p => selectedPieceIds.includes(p.id))}
+                                            onUpdateMultiple={(updates) => {
+                                              setPieces(prev => prev.map(p => {
+                                                const u = updates.find(x => x.id === p.id);
+                                                return u ? { ...p, ...u.patch } : p;
+                                              }));
+                                            }}
+                                          />
+                                        </div>
+                                      )}
                                     </div>
-                                  </div>
                                 );
                               })()}
                             </div>
@@ -3674,72 +4286,23 @@ export default function App() {
                               );
                             })()}
 
-                            {/* Slot details panel */}
-                            {activePiece.ranurado && (() => {
-                              const config = activePiece.ranuraConfig || { lado: 'L2', dist: 18, esp: 4, prof: 8 };
-                              
-                              return (
-                                <div className="mt-1 bg-[#141414] border border-[#232323] p-1.5 rounded space-y-1">
-                                  <div className="flex items-center justify-between text-[8px] font-bold text-[#f0a144] uppercase border-b border-[#222] pb-0.5">
-                                    <span>⚙️ Configuración de Ranura</span>
-                                    <span className="text-[#64748b] text-[6.5px]">sketchup plugin</span>
-                                  </div>
-                                  <div className="grid grid-cols-2 gap-1.5">
-                                    <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">LADO</label>
-                                      <select 
-                                        value={config.lado}
-                                        onChange={(e) => updatePiece(activePiece.id, { 
-                                          ranuraConfig: { ...config, lado: e.target.value as any } 
-                                        })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none cursor-pointer focus:border-[#f0a144]"
-                                      >
-                                        <option value="L1">L1 (Largo Frente)</option>
-                                        <option value="L2">L2 (Largo Atrás)</option>
-                                        <option value="A1">A1 (Ancho Der)</option>
-                                        <option value="A2">A2 (Ancho Izq)</option>
-                                      </select>
-                                    </div>
-                                    
-                                    <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">DIST (mm)</label>
-                                      <input 
-                                        type="number" 
-                                        value={config.dist}
-                                        onChange={(e) => updatePiece(activePiece.id, { 
-                                          ranuraConfig: { ...config, dist: parseFloat(e.target.value) || 0 } 
-                                        })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none font-mono focus:border-[#f0a144]"
-                                      />
-                                    </div>
-                                    
-                                    <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">ESP (mm)</label>
-                                      <input 
-                                        type="number" 
-                                        value={config.esp}
-                                        onChange={(e) => updatePiece(activePiece.id, { 
-                                          ranuraConfig: { ...config, esp: parseFloat(e.target.value) || 0 } 
-                                        })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none font-mono focus:border-[#f0a144]"
-                                      />
-                                    </div>
-                                    
-                                    <div className="flex flex-col gap-0.5">
-                                      <label className="text-[#888] font-bold text-[6.5px] uppercase">PROF (mm)</label>
-                                      <input 
-                                        type="number" 
-                                        value={config.prof}
-                                        onChange={(e) => updatePiece(activePiece.id, { 
-                                          ranuraConfig: { ...config, prof: parseFloat(e.target.value) || 0 } 
-                                        })}
-                                        className="bg-[#1e1e1e] border border-[#33] rounded px-1 py-0.5 text-white text-[8px] outline-none font-mono focus:border-[#f0a144]"
-                                      />
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })()}
+                            {/* Ranura Config details */}
+                            {activePiece.ranurado && (
+                              <div className="mt-1.5">
+                                <RanuraConfigCard 
+                                  piece={activePiece} 
+                                  onUpdate={(patch) => updatePiece(activePiece.id, patch)} 
+                                  onToast={showToast}
+                                  selectedPieces={pieces.filter(p => selectedPieceIds.includes(p.id))}
+                                  onUpdateMultiple={(updates) => {
+                                    setPieces(prev => prev.map(p => {
+                                      const u = updates.find(x => x.id === p.id);
+                                      return u ? { ...p, ...u.patch } : p;
+                                    }));
+                                  }}
+                                />
+                              </div>
+                            )}
 
                             {/* Edge Banding items */}
                             <div className="grid grid-cols-2 gap-x-1 gap-y-1 mt-2">
@@ -4486,8 +5049,12 @@ export default function App() {
                   </div>
                 )}
               </div>
+            </div>
+          )}
 
-              {/* Border and Corner Resize Handles */}
+          {/* Border and Corner Resize Handles (Only on desktop) */}
+          {!isMobileScreen && (
+            <>
               <div 
                 className="absolute top-0 right-0 w-2 h-full cursor-ew-resize hover:bg-[#f0a144]/30 z-20 transition-colors"
                 {...trayResizeRightProps}
@@ -4509,11 +5076,13 @@ export default function App() {
                   <circle cx="2.5" cy="5" r="0.75" />
                 </svg>
               </div>
+            </>
+          )}
 
-            </div>
           </div>
         </div>
-      )}
+      );
+    })()}
     </div>
 
       {/* Delete Confirmation Modal */}
@@ -4882,6 +5451,20 @@ export default function App() {
         const axisIdx = fredoAxis === 'X' ? 0 : fredoAxis === 'Y' ? 1 : 2;
         const currentDim = currentBounds.size.getComponent(axisIdx) + (fredoPreviewDelta || 0);
 
+        if (isStretchToolbarClosed) {
+          return (
+            <button
+              type="button"
+              onClick={() => setIsStretchToolbarClosed(false)}
+              className="fixed bottom-[125px] left-1/2 -translate-x-1/2 z-40 bg-[#121212]/90 backdrop-blur-md border border-[#a3e635]/80 text-[#a3e635] hover:text-white px-3 py-1 rounded-full text-[9px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+              title="Abrir barra de estirado inteligente"
+            >
+              <span>📐</span>
+              <span>Abrir Estirado</span>
+            </button>
+          );
+        }
+
         return (
           <SmartStretchToolbar
             axis={fredoAxis}
@@ -4889,12 +5472,77 @@ export default function App() {
             mode={fredoMode}
             onChangeMode={setFredoMode}
             currentDimMm={currentDim}
+            isDraggingGizmo={!!fredoPreviewDelta && fredoPreviewDelta !== 0}
             onApplyDimension={(dim, isAbsolute) => handleApplyFredoNumericStretch(dim, isAbsolute)}
             onQuickStep={(step) => handleQuickFredoStep(step)}
-            onClose={() => setTransformMode('translate')}
+            onClose={() => setIsStretchToolbarClosed(true)}
           />
         );
       })()}
+
+      {/* MOVABLE FLOATING SMART DIMENSION TOOLBAR (Barra compacta de dimensionar para el gizmo 3D) */}
+      {selectedPieceIds.length > 0 && transformMode === 'scale' && (() => {
+        const targetPiece = pieces.find(p => p.id === selectedPieceIds[0] && !p.hidden);
+        if (!targetPiece) return null;
+
+        const currentDim = activeScaling?.isDragging
+          ? (footerScaleAxis === 'largo' ? activeScaling.largo : footerScaleAxis === 'ancho' ? activeScaling.ancho : activeScaling.espesor)
+          : (footerScaleAxis === 'largo' ? targetPiece.largo : footerScaleAxis === 'ancho' ? targetPiece.ancho : targetPiece.espesor);
+
+        if (isDimToolbarClosed) {
+          return (
+            <button
+              type="button"
+              onClick={() => setIsDimToolbarClosed(false)}
+              className="fixed bottom-[125px] left-1/2 -translate-x-1/2 z-40 bg-[#121212]/90 backdrop-blur-md border border-[#f0a144]/80 text-[#f0a144] hover:text-white px-3 py-1 rounded-full text-[9px] font-bold shadow-lg flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+              title="Abrir barra de dimensionar"
+            >
+              <span>📐</span>
+              <span>Abrir Dimensionar</span>
+            </button>
+          );
+        }
+
+        return (
+          <SmartDimensionToolbar
+            axis={footerScaleAxis}
+            onChangeAxis={setFooterScaleAxis}
+            dimensionSide={dimensionSide}
+            onChangeDimensionSide={setDimensionSide}
+            anchorMode={anchorMode}
+            onChangeAnchorMode={setAnchorMode}
+            currentDimMm={currentDim}
+            liveDeltaMm={activeScaling?.delta}
+            isSnapped={activeScaling?.isSnapped}
+            snapLabel={activeScaling?.snapLabel}
+            pieceName={targetPiece.name}
+            isDraggingGizmo={!!activeScaling?.isDragging}
+            onApplyDimension={(dim, isAbsolute) => handleApplyNumericDimension(dim, isAbsolute)}
+            onClose={() => setIsDimToolbarClosed(true)}
+          />
+        );
+      })()}
+
+      {/* MODAL COMPONENTE DINÁMICO: DISEÑADOR DE ESTANTES PARAMÉTRICOS */}
+      {isDynamicShelfModalOpen && (
+        <DynamicShelfModal
+          isOpen={isDynamicShelfModalOpen}
+          onClose={() => setIsDynamicShelfModalOpen(false)}
+          onApplyTo3D={handleApplyDynamicShelf}
+          existingPiecesCount={pieces.length}
+          onOpen2DCutPlan={(shelfPieces) => {
+            setPieces(shelfPieces);
+            setViewMode('2d');
+            setIsDynamicShelfModalOpen(false);
+            showToast('Piezas cargadas. Abriendo plano oficial de cortes 2D...');
+          }}
+          onSaveToWarehouse={handleSaveDynamicShelfToWarehouse}
+          onSaveAsAppDefault={handleSaveDynamicShelfAsAppDefault}
+          initialConfig={dynamicShelfConfig}
+          initialItemName={dynamicShelfItemName}
+          sheetConfig={sheetConfig}
+        />
+      )}
 
       {/* Floating non-blocking Toast */}
       {toastMessage && (
@@ -4924,6 +5572,7 @@ function ToolbarIcon({ icon, active, onClick, title }: { icon: any, active?: boo
 function EntityCantoFieldTray({ 
   label, 
   sub, 
+  edgeKey,
   value, 
   gruesoMm = 3, 
   delgadoMm = 0.45, 
@@ -4931,6 +5580,7 @@ function EntityCantoFieldTray({
 }: { 
   label: string; 
   sub: string; 
+  edgeKey?: 'largo1' | 'largo2' | 'ancho1' | 'ancho2';
   value: EdgeConfig['largo1']; 
   gruesoMm?: number; 
   delgadoMm?: number; 
@@ -4953,6 +5603,8 @@ function EntityCantoFieldTray({
     ? 'text-[#f87171] bg-red-500/20 border-red-500/40' 
     : 'text-[#666666] bg-[#1a1a1a] border-[#2c2c2c]';
 
+  const edgeLineColor = isDelgado ? '#38bdf8' : isGrueso ? '#ef4444' : '#444444';
+
   return (
     <button
       type="button"
@@ -4964,9 +5616,27 @@ function EntityCantoFieldTray({
       title={`${label} (${sub}): Clic para alternar (NO → DEL ${delgadoMm}mm → GRU ${gruesoMm}mm con descuento de corte)`}
       className={`border rounded px-2 py-1.5 flex items-center justify-between transition-all cursor-pointer select-none text-left w-full active:scale-[0.98] ${borderClass}`}
     >
-      <div className="flex flex-col min-w-0 pr-1">
-        <span className="text-[8px] font-bold text-[#dddddd] uppercase truncate">{label}</span>
-        <span className="text-[6.5px] text-[#777777] font-mono leading-none truncate">{sub}</span>
+      <div className="flex items-center gap-1.5 min-w-0 pr-1">
+        {edgeKey && (
+          <div className="w-3.5 h-2.5 rounded-[1.5px] border border-white/25 relative bg-black/50 shrink-0">
+            {edgeKey === 'largo1' && (
+              <div className="absolute top-0 left-0 right-0 h-[1.5px] rounded-t-[1px]" style={{ backgroundColor: edgeLineColor }} />
+            )}
+            {edgeKey === 'largo2' && (
+              <div className="absolute bottom-0 left-0 right-0 h-[1.5px] rounded-b-[1px]" style={{ backgroundColor: edgeLineColor }} />
+            )}
+            {edgeKey === 'ancho1' && (
+              <div className="absolute top-0 bottom-0 right-0 w-[1.5px] rounded-r-[1px]" style={{ backgroundColor: edgeLineColor }} />
+            )}
+            {edgeKey === 'ancho2' && (
+              <div className="absolute top-0 bottom-0 left-0 w-[1.5px] rounded-l-[1px]" style={{ backgroundColor: edgeLineColor }} />
+            )}
+          </div>
+        )}
+        <div className="flex flex-col min-w-0">
+          <span className="text-[8px] font-bold text-[#dddddd] uppercase truncate">{label}</span>
+          <span className="text-[6.5px] text-[#777777] font-mono leading-none truncate">{sub}</span>
+        </div>
       </div>
       <span className={`text-[7px] font-mono font-bold px-1.5 py-0.5 rounded border shrink-0 ${badgeColor}`}>
         {badgeText}

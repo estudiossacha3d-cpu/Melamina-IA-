@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { Piece, SheetConfig, EdgeConfig, EdgeThicknessConfig } from '../types';
-import { calculatePieceCutDimensions, DEFAULT_EDGE_THICKNESS_CONFIG } from '../lib/edgeCalculations';
+import { calculatePieceCutDimensions, DEFAULT_EDGE_THICKNESS_CONFIG, getPieceEdgeLengths, isA1RelocatedToFront } from '../lib/edgeCalculations';
 import { getPieceMaterialProfile, SubstrateType } from '../lib/materialCalculations';
 import { v4 as uuidv4 } from 'uuid';
 import { CutPiecesTable } from './CutPiecesTable';
@@ -8,13 +8,13 @@ import { StockSheetsTable } from './StockSheetsTable';
 import { PdfExportModal } from './PdfExportModal';
 import { MaterialSummaryModal } from './MaterialSummaryModal';
 import { useDraggableWindow } from '../hooks/useDraggableWindow';
-import { packRectangles } from '../lib/cutOptimizer';
 import { 
   Settings, BarChart3, Scissors, Layers, RotateCw, ZoomIn, ZoomOut, 
   Maximize2, Minimize2, LayoutList, Table, Rows, Grid, Search, ChevronUp, ChevronDown, 
   Check, Layers3, Sun, Moon, FlipHorizontal, Printer, Download, Eye, EyeOff, Hash, GripHorizontal,
   Box, Trash2, Move, Plus, Minus, PanelLeftClose, PanelLeftOpen, Warehouse, ClipboardList,
-  ChevronsRight, GripVertical, ChevronsLeft, X, FileText, Type, Sliders, RotateCcw, Sparkles
+  ChevronsRight, GripVertical, ChevronsLeft, X, FileText, Type, Sliders, RotateCcw, Sparkles,
+  Shuffle
 } from 'lucide-react';
 
 export interface CadTextCalibration {
@@ -80,6 +80,8 @@ export interface Rect {
   isMirror?: boolean;
   hasGrain?: boolean;
   veta?: boolean;
+  isTransversal?: boolean;
+  vetaRotation?: number;
   textureUrl?: string | null;
 }
 
@@ -127,7 +129,7 @@ export interface BoardGroup {
   edgeThick: number;
 }
 
-// Shared professional packing engine used by the diagram and material reports.
+// Professional Packing Algorithm: Guillotine with First-Fit Decreasing
 function professionalPack(
   pieces: Piece[], 
   config: SheetConfig,
@@ -136,26 +138,97 @@ function professionalPack(
   boards: PackedBoard[];
   stats: { efficiency: number; areaUsed: number; totalArea: number; boardsCount: number };
 } {
-  const items = pieces.flatMap(p => {
-    const cutDim = calculatePieceCutDimensions(p, edgeThicknessConfig);
-    const profile = getPieceMaterialProfile(p);
+  const { width, height, kerf, margin } = config;
+  const usableW = width - (margin * 2);
+  const usableH = height - (margin * 2);
+
+  // Flatten pieces based on quantity, applying edge thickness deductions for corte
+  const flatPieces: { 
+    w: number; 
+    h: number; 
+    id: string; 
+    name: string; 
+    veta: boolean; 
+    isTransversal: boolean;
+    vetaRotation: number;
+    rotacion: boolean;
+    cantos: EdgeConfig; 
+    material?: string; 
+    espesor?: number;
+    finalW: number;
+    finalH: number;
+    descuentoLargo: number;
+    descuentoAncho: number;
+    customColor?: string;
+    color?: string;
+    textColor?: string;
+    isDark?: boolean;
+    substrate?: SubstrateType;
+    substrateLabel?: string;
+    materialName?: string;
+    isWood?: boolean;
+    isGlass?: boolean;
+    isMirror?: boolean;
+    hasGrain?: boolean;
+    textureUrl?: string | null;
+  }[] = [];
+
+  pieces.forEach(p => {
+    // Compatibilidad defensiva: si una pieza legacy de divisor tiene largo < ancho pero su canto frontal está en A1:
+    const isLegacyInvertedDivider = isA1RelocatedToFront(p) && p.largo < p.ancho;
+    const normLargo = isLegacyInvertedDivider ? p.ancho : p.largo;
+    const normAncho = isLegacyInvertedDivider ? p.largo : p.ancho;
+    const pieceForCut = isLegacyInvertedDivider ? { ...p, largo: normLargo, ancho: normAncho } : p;
+
+    const cutDim = calculatePieceCutDimensions(pieceForCut, edgeThicknessConfig);
+    const profile = getPieceMaterialProfile(pieceForCut);
+    
+    // Si la pieza tiene veta y está orientada en sentido transversal (90° o 270°):
+    // La veta de la plancha corre a lo largo (horizontal). Para que la veta de la pieza coincida con la plancha,
+    // en la plancha se corta con su ancho a lo largo (dimensiones invertidas):
+    const isTransversalVeta = Boolean(pieceForCut.veta && (pieceForCut.vetaOrientacion === 'transversal' || pieceForCut.vetaRotation === 90 || pieceForCut.vetaRotation === 270));
+    const cutW = isTransversalVeta ? cutDim.anchoCorte : cutDim.largoCorte;
+    const cutH = isTransversalVeta ? cutDim.largoCorte : cutDim.anchoCorte;
+    const finW = isTransversalVeta ? pieceForCut.ancho : pieceForCut.largo;
+    const finH = isTransversalVeta ? pieceForCut.largo : pieceForCut.ancho;
+    const descW = isTransversalVeta ? cutDim.descuentoAnchoTotal : cutDim.descuentoLargoTotal;
+    const descH = isTransversalVeta ? cutDim.descuentoLargoTotal : cutDim.descuentoAnchoTotal;
+    
+    // Cantos efectivos para el despiece y plano 2D:
+    // Aplica fielmente la indicación de cantos de la pieza (L1, L2, A1, A2).
+    // Si la pieza tiene veta transversal (rotada 90° para corte), se transponen adecuadamente:
+    const effectiveCantos: EdgeConfig = isTransversalVeta ? {
+      largo1: p.cantos?.ancho1 || 'Ninguno',
+      largo2: p.cantos?.ancho2 || 'Ninguno',
+      ancho1: p.cantos?.largo1 || 'Ninguno',
+      ancho2: p.cantos?.largo2 || 'Ninguno',
+    } : {
+      largo1: p.cantos?.largo1 || 'Ninguno',
+      largo2: p.cantos?.largo2 || 'Ninguno',
+      ancho1: p.cantos?.ancho1 || 'Ninguno',
+      ancho2: p.cantos?.ancho2 || 'Ninguno',
+    };
+
+    // Rotación permitida: solo si NO tiene veta física y rotación está autorizada (desactivada por defecto)
     const canRotate = !p.veta && p.rotacion === true;
-    const quantity = Math.max(0, Math.floor(p.cantidad || 0));
-    return Array.from({ length: quantity }, () => ({
-      w: cutDim.largoCorte,
-      h: cutDim.anchoCorte,
-      id: p.id,
-      name: p.name,
-      canRotate,
-      meta: {
+
+    for (let i = 0; i < p.cantidad; i++) {
+      flatPieces.push({ 
+        w: cutW, 
+        h: cutH, 
+        id: p.id, 
+        name: p.name,
         veta: !!p.veta,
-        cantos: p.cantos || { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' } as EdgeConfig,
+        isTransversal: isTransversalVeta,
+        vetaRotation: p.vetaRotation ?? (isTransversalVeta ? 90 : 0),
+        rotacion: canRotate,
+        cantos: effectiveCantos,
         material: p.material || 'MELAMINA',
         espesor: p.espesor || 18,
-        finalW: p.largo,
-        finalH: p.ancho,
-        descuentoLargo: cutDim.descuentoLargoTotal,
-        descuentoAncho: cutDim.descuentoAnchoTotal,
+        finalW: finW,
+        finalH: finH,
+        descuentoLargo: descW,
+        descuentoAncho: descH,
         customColor: p.customColor,
         color: profile.color,
         textColor: profile.textColor,
@@ -167,48 +240,174 @@ function professionalPack(
         isGlass: profile.isGlass,
         isMirror: profile.isMirror,
         hasGrain: profile.hasGrain,
-        textureUrl: profile.textureUrl,
-      },
-    }));
+        textureUrl: profile.textureUrl
+      });
+    }
   });
-  const packed = packRectangles(items, config);
-  const boards: PackedBoard[] = packed.boards.map(board => ({
-    boardIndex: board.boardIndex,
-    wasteRects: board.wasteRects,
-    stats: board.stats,
-    rects: board.rects.map(rect => ({
-      x: rect.x,
-      y: rect.y,
-      w: rect.w,
-      h: rect.h,
-      id: rect.id,
-      name: rect.name,
-      rotated: rect.rotated,
-      cutIndex: rect.cutIndex,
-      cantos: rect.meta.cantos,
-      material: rect.meta.material,
-      espesor: rect.meta.espesor,
-      finalW: rect.rotated ? rect.meta.finalH : rect.meta.finalW,
-      finalH: rect.rotated ? rect.meta.finalW : rect.meta.finalH,
-      descuentoLargo: rect.meta.descuentoLargo,
-      descuentoAncho: rect.meta.descuentoAncho,
-      customColor: rect.meta.customColor,
-      color: rect.meta.color,
-      textColor: rect.meta.textColor,
-      isDark: rect.meta.isDark,
-      substrate: rect.meta.substrate,
-      substrateLabel: rect.meta.substrateLabel,
-      materialName: rect.meta.materialName,
-      isWood: rect.meta.isWood,
-      isGlass: rect.meta.isGlass,
-      isMirror: rect.meta.isMirror,
-      hasGrain: rect.meta.hasGrain,
-      veta: rect.meta.veta,
-      textureUrl: rect.meta.textureUrl,
-    })),
-  }));
 
-  return { boards, stats: packed.stats };
+  // Sort by area decreasing
+  flatPieces.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+
+  const boards: PackedBoard[] = [];
+  let areaUsed = 0;
+
+  const currentPieces = [...flatPieces];
+
+  while (currentPieces.length > 0) {
+    const boardRects: Rect[] = [];
+    const spaces: { x: number; y: number; w: number; h: number }[] = [
+      { x: margin, y: margin, w: usableW, h: usableH }
+    ];
+
+    for (let i = 0; i < currentPieces.length; i++) {
+      const item = currentPieces[i];
+      let bestSpaceIdx = -1;
+      let bestRotated = false;
+      let bestShortSide = Infinity;
+      let bestLongSide = Infinity;
+
+      // Best Short Side Fit (BSSF) guillotine search:
+      // Evaluates both normal and rotated fit if item.rotacion is true.
+      // If item.rotacion is false, strictly locks normal orientation.
+      for (let j = 0; j < spaces.length; j++) {
+        const s = spaces[j];
+
+        // Normal fit (orientation as listed in table)
+        if (item.w <= s.w && item.h <= s.h) {
+          const leftoverShort = Math.min(s.w - item.w, s.h - item.h);
+          const leftoverLong = Math.max(s.w - item.w, s.h - item.h);
+          if (leftoverShort < bestShortSide || (leftoverShort === bestShortSide && leftoverLong < bestLongSide)) {
+            bestShortSide = leftoverShort;
+            bestLongSide = leftoverLong;
+            bestSpaceIdx = j;
+            bestRotated = false;
+          }
+        }
+
+        // Rotated fit (90° rotation - ONLY permitted if item.rotacion is true)
+        if (item.rotacion && item.h <= s.w && item.w <= s.h) {
+          const leftoverShort = Math.min(s.w - item.h, s.h - item.w);
+          const leftoverLong = Math.max(s.w - item.h, s.h - item.w);
+          if (leftoverShort < bestShortSide || (leftoverShort === bestShortSide && leftoverLong < bestLongSide)) {
+            bestShortSide = leftoverShort;
+            bestLongSide = leftoverLong;
+            bestSpaceIdx = j;
+            bestRotated = true;
+          }
+        }
+      }
+
+      const spaceIdx = bestSpaceIdx;
+      const rotated = bestRotated;
+
+      if (spaceIdx !== -1) {
+        const space = spaces[spaceIdx];
+        const pw = rotated ? item.h : item.w;
+        const ph = rotated ? item.w : item.h;
+
+        boardRects.push({
+          x: space.x,
+          y: space.y,
+          w: pw,
+          h: ph,
+          id: item.id,
+          name: item.name,
+          rotated,
+          isTransversal: item.isTransversal,
+          vetaRotation: item.vetaRotation,
+          cutIndex: boardRects.length + 1,
+          cantos: item.cantos,
+          material: item.material,
+          espesor: item.espesor,
+          finalW: rotated ? item.finalH : item.finalW,
+          finalH: rotated ? item.finalW : item.finalH,
+          descuentoLargo: item.descuentoLargo,
+          descuentoAncho: item.descuentoAncho,
+          customColor: item.customColor,
+          color: item.color,
+          textColor: item.textColor,
+          isDark: item.isDark,
+          substrate: item.substrate,
+          substrateLabel: item.substrateLabel,
+          materialName: item.materialName,
+          isWood: item.isWood,
+          isGlass: item.isGlass,
+          isMirror: item.isMirror,
+          hasGrain: item.hasGrain,
+          veta: item.veta,
+          textureUrl: item.textureUrl
+        });
+
+        areaUsed += pw * ph;
+
+        // Split space (Guillotine cut)
+        const remainingW = space.w - pw - kerf;
+        const remainingH = space.h - ph - kerf;
+
+        spaces.splice(spaceIdx, 1);
+
+        if (remainingW > 0 && ph > 0) {
+          spaces.push({ x: space.x + pw + kerf, y: space.y, w: remainingW, h: ph });
+        }
+        if (remainingH > 0 && space.w > 0) {
+          spaces.push({ x: space.x, y: space.y + ph + kerf, w: space.w, h: remainingH });
+        }
+
+        spaces.sort((a, b) => (a.y === b.y) ? a.x - b.x : a.y - b.y);
+
+        currentPieces.splice(i, 1);
+        i--;
+      }
+    }
+
+    if (boardRects.length === 0 && currentPieces.length > 0) {
+      currentPieces.shift();
+      continue;
+    }
+
+    // Collect remaining unallocated spaces as waste (desechos)
+    const wasteRects: WasteRect[] = [];
+    if (margin > 0) {
+      wasteRects.push({ x: 0, y: 0, w: width, h: margin, isMargin: true });
+      wasteRects.push({ x: 0, y: height - margin, w: width, h: margin, isMargin: true });
+      wasteRects.push({ x: 0, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
+      wasteRects.push({ x: width - margin, y: margin, w: margin, h: height - (margin * 2), isMargin: true });
+    }
+
+    spaces.forEach(s => {
+      if (s.w > 2 && s.h > 2) {
+        wasteRects.push({ x: s.x, y: s.y, w: s.w, h: s.h, isMargin: false });
+      }
+    });
+
+    const boardAreaUsed = boardRects.reduce((acc, r) => acc + (r.w * r.h), 0);
+    const boardTotalArea = width * height;
+    const boardEfficiency = boardTotalArea > 0 ? (boardAreaUsed / boardTotalArea) * 100 : 0;
+
+    boards.push({
+      boardIndex: boards.length + 1,
+      rects: boardRects,
+      wasteRects,
+      stats: {
+        efficiency: boardEfficiency,
+        areaUsed: boardAreaUsed,
+        totalArea: boardTotalArea
+      }
+    });
+  }
+
+  const totalArea = boards.length * width * height;
+  const efficiency = totalArea > 0 ? (areaUsed / totalArea) * 100 : 0;
+
+  return { 
+    boards, 
+    stats: { 
+      efficiency, 
+      areaUsed, 
+      totalArea, 
+      boardsCount: boards.length 
+    } 
+  };
 }
 
 export default function CutPlanViewer({ 
@@ -226,12 +425,6 @@ export default function CutPlanViewer({
 }: CutPlanViewerProps) {
   const [showSettings, setShowSettings] = useState(false);
   const [zoom, setZoom] = useState(0.35);
-  const [wheelMode, setWheelMode] = useState<'scroll' | 'zoom'>('scroll');
-  const [showZoomHint, setShowZoomHint] = useState<boolean>(false);
-  const zoomHintTimeoutRef = useRef<any>(null);
-  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [isPanning, setIsPanning] = useState(false);
-  const panStartRef = useRef<{ x: number; y: number; originX: number; originY: number }>({ x: 0, y: 0, originX: 0, originY: 0 });
   const [hoveredPieceId, setHoveredPieceId] = useState<string | null>(null);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
 
@@ -244,6 +437,82 @@ export default function CutPlanViewer({
 
   // Quantity to rotate map state per piece row
   const [rotateQtyMap, setRotateQtyMap] = useState<Record<string, number>>({});
+
+  // Rotar pieza 90° directamente en plano de cortes y demanda
+  const handleRotatePiece90 = (pieceId: string) => {
+    const p = pieces.find(x => x.id === pieceId);
+    if (!p) return;
+    const oldLargo = p.largo;
+    const oldAncho = p.ancho;
+    const oldCantos = p.cantos || { largo1: 'Ninguno', largo2: 'Ninguno', ancho1: 'Ninguno', ancho2: 'Ninguno' };
+    const newCantos: EdgeConfig = {
+      largo1: oldCantos.ancho1,
+      largo2: oldCantos.ancho2,
+      ancho1: oldCantos.largo1,
+      ancho2: oldCantos.largo2
+    };
+
+    const isCurrentTransversal = p.veta && (p.vetaOrientacion === 'transversal' || p.vetaRotation === 90);
+    const newVetaOrientacion = p.veta ? (isCurrentTransversal ? 'longitudinal' : 'transversal') : p.vetaOrientacion;
+    const newVetaRotation = p.veta ? (isCurrentTransversal ? 0 : 90) : p.vetaRotation;
+
+    if (setPieces) {
+      setPieces(prev => prev.map(item => item.id === pieceId ? {
+        ...item,
+        largo: oldAncho,
+        ancho: oldLargo,
+        cantos: newCantos,
+        vetaOrientacion: newVetaOrientacion,
+        vetaRotation: newVetaRotation
+      } : item));
+    } else if (updatePiece) {
+      updatePiece(pieceId, {
+        largo: oldAncho,
+        ancho: oldLargo,
+        cantos: newCantos,
+        vetaOrientacion: newVetaOrientacion,
+        vetaRotation: newVetaRotation
+      });
+    }
+  };
+
+  // Alternar autorización de rotación automática en el optimizador
+  const handleTogglePieceRotationPermit = (pieceId: string) => {
+    const p = pieces.find(x => x.id === pieceId);
+    if (!p) return;
+    const nextVal = !p.rotacion;
+    if (setPieces) {
+      setPieces(prev => prev.map(item => item.id === pieceId ? {
+        ...item,
+        rotacion: nextVal,
+        ...(nextVal ? { veta: false } : {})
+      } : item));
+    } else if (updatePiece) {
+      updatePiece(pieceId, {
+        rotacion: nextVal,
+        ...(nextVal ? { veta: false } : {})
+      });
+    }
+  };
+
+  // Alternar sentido de veta (longitudinal 0° vs transversal 90° vs sin veta)
+  const handleTogglePieceVeta = (pieceId: string) => {
+    const p = pieces.find(x => x.id === pieceId);
+    if (!p) return;
+    if (!p.veta) {
+      const updates = { veta: true, vetaOrientacion: 'longitudinal' as const, vetaRotation: 0, rotacion: false };
+      if (setPieces) setPieces(prev => prev.map(item => item.id === pieceId ? { ...item, ...updates } : item));
+      else if (updatePiece) updatePiece(pieceId, updates);
+    } else if (p.vetaOrientacion !== 'transversal' && p.vetaRotation !== 90) {
+      const updates = { veta: true, vetaOrientacion: 'transversal' as const, vetaRotation: 90, rotacion: false };
+      if (setPieces) setPieces(prev => prev.map(item => item.id === pieceId ? { ...item, ...updates } : item));
+      else if (updatePiece) updatePiece(pieceId, updates);
+    } else {
+      const updates = { veta: false, vetaRotation: 0, vetaOrientacion: 'longitudinal' as const, rotacion: false };
+      if (setPieces) setPieces(prev => prev.map(item => item.id === pieceId ? { ...item, ...updates } : item));
+      else if (updatePiece) updatePiece(pieceId, updates);
+    }
+  };
 
   // Floating Draggable & Resizable Windows (Demanda & Almacén)
   const [showDemanda, setShowDemanda] = useState<boolean>(false);
@@ -339,7 +608,7 @@ export default function CutPlanViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // Wheel Scroll & Zoom Listener on 2D graphics canvas (separates scrolling from zooming)
+  // Wheel Scroll & Zoom Listener on 2D graphics canvas (Ctrl+Wheel zooms, normal wheel scrolls natively)
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -347,28 +616,18 @@ export default function CutPlanViewer({
     const handleNativeWheel = (e: WheelEvent) => {
       if ((e.target as HTMLElement).closest('input, select, textarea, [data-no-canvas-zoom="true"]')) return;
 
-      const isZoomTrigger = wheelMode === 'zoom' || e.ctrlKey || e.metaKey || e.altKey;
-
-      if (isZoomTrigger) {
+      if (e.ctrlKey || e.metaKey || e.altKey) {
         e.preventDefault();
         const zoomFactor = e.deltaY < 0 ? 1.12 : 0.89;
         setZoom(prev => Math.max(0.15, Math.min(4.0, Number((prev * zoomFactor).toFixed(2)))));
-      } else {
-        // Normal scroll: do NOT call e.preventDefault(), allow native container scrolling!
-        setShowZoomHint(true);
-        if (zoomHintTimeoutRef.current) clearTimeout(zoomHintTimeoutRef.current);
-        zoomHintTimeoutRef.current = setTimeout(() => {
-          setShowZoomHint(false);
-        }, 1800);
       }
     };
 
     container.addEventListener('wheel', handleNativeWheel, { passive: false });
     return () => {
       container.removeEventListener('wheel', handleNativeWheel);
-      if (zoomHintTimeoutRef.current) clearTimeout(zoomHintTimeoutRef.current);
     };
-  }, [wheelMode]);
+  }, []);
 
   // Touch Pinch-to-zoom (2 fingers) and 1-finger scroll
   useEffect(() => {
@@ -422,33 +681,6 @@ export default function CutPlanViewer({
     };
   }, [zoom]);
 
-  const handleCanvasMouseDown = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('button, input, select, a, [data-piece-rect="true"]')) {
-      return;
-    }
-    setIsPanning(true);
-    panStartRef.current = {
-      x: e.clientX,
-      y: e.clientY,
-      originX: pan.x,
-      originY: pan.y
-    };
-  };
-
-  const handleCanvasMouseMove = (e: React.MouseEvent) => {
-    if (!isPanning) return;
-    const dx = e.clientX - panStartRef.current.x;
-    const dy = e.clientY - panStartRef.current.y;
-    setPan({
-      x: panStartRef.current.originX + dx,
-      y: panStartRef.current.originY + dy
-    });
-  };
-
-  const handleCanvasMouseUp = () => {
-    setIsPanning(false);
-  };
-  
   const { boardGroups, totalStats } = useMemo(() => {
     // Group pieces by material profile (substrate + material + thickness)
     const groupsMap: Record<string, {
@@ -490,11 +722,12 @@ export default function CutPlanViewer({
         const qty = p.cantidad;
         piecesCount += qty;
         if (!p.cantos || profile.substrate === 'vidrio') return;
+        const edgeLens = getPieceEdgeLengths(p);
         const edges = [
-          { type: p.cantos.largo1, length: p.largo },
-          { type: p.cantos.largo2, length: p.largo },
-          { type: p.cantos.ancho1, length: p.ancho },
-          { type: p.cantos.ancho2, length: p.ancho }
+          { type: p.cantos.largo1, length: edgeLens.largo1 },
+          { type: p.cantos.largo2, length: edgeLens.largo2 },
+          { type: p.cantos.ancho1, length: edgeLens.ancho1 },
+          { type: p.cantos.ancho2, length: edgeLens.ancho2 }
         ];
         edges.forEach(e => {
           if (e.type === 'Canto Delgado') edgeThin += e.length * qty;
@@ -546,14 +779,15 @@ export default function CutPlanViewer({
     
     pieces.forEach(p => {
       const qty = p.cantidad;
-      const { largo, ancho, cantos } = p;
+      const { cantos } = p;
       if (!cantos) return;
       
+      const edgeLens = getPieceEdgeLengths(p);
       const edges = [
-        { type: cantos.largo1, length: largo },
-        { type: cantos.largo2, length: largo },
-        { type: cantos.ancho1, length: ancho },
-        { type: cantos.ancho2, length: ancho }
+        { type: cantos.largo1, length: edgeLens.largo1 },
+        { type: cantos.largo2, length: edgeLens.largo2 },
+        { type: cantos.ancho1, length: edgeLens.ancho1 },
+        { type: cantos.ancho2, length: edgeLens.ancho2 }
       ];
 
       edges.forEach(e => {
@@ -660,7 +894,7 @@ export default function CutPlanViewer({
       } else {
         setZoom(0.35);
       }
-      setPan({ x: 0, y: 0 });
+      containerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 
@@ -673,7 +907,10 @@ export default function CutPlanViewer({
     }[] = [];
 
     pieces.forEach(p => {
-      const key = `${Math.round(p.largo)}-${Math.round(p.ancho)}-${p.espesor || 18}-${p.cantos?.largo1}-${p.cantos?.largo2}-${p.cantos?.ancho1}-${p.cantos?.ancho2}-${p.material || ''}-${p.customColor || ''}`;
+      const isTransversal = Boolean(p.veta && (p.vetaOrientacion === 'transversal' || p.vetaRotation === 90 || p.vetaRotation === 270));
+      const vetaKey = p.veta ? (isTransversal ? 'veta-trans-90' : 'veta-long-0') : (p.rotacion ? 'rot-free' : 'rot-lock');
+      const ranuraKey = p.ranurado ? `ran-${p.ranuraConfig?.lado || 'L1'}` : 'noran';
+      const key = `${Math.round(p.largo)}-${Math.round(p.ancho)}-${p.espesor || 18}-${p.cantos?.largo1}-${p.cantos?.largo2}-${p.cantos?.ancho1}-${p.cantos?.ancho2}-${p.material || ''}-${p.customColor || ''}-${vetaKey}-${ranuraKey}`;
       const group = groups.find(g => g.key === key);
       if (group) {
         group.ids.push(p.id);
@@ -1240,7 +1477,7 @@ export default function CutPlanViewer({
                 type="button"
                 onClick={() => {
                   setSelectedBoardFilter('all');
-                  setPan({ x: 0, y: 0 });
+                  containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
                 }}
                 className={`px-2.5 py-1 rounded-lg text-[9px] sm:text-[10px] font-bold uppercase transition-colors shrink-0 cursor-pointer ${selectedBoardFilter === 'all' ? 'bg-[#f0a144] text-black shadow font-black' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
               >
@@ -1252,7 +1489,7 @@ export default function CutPlanViewer({
                   type="button"
                   onClick={() => {
                     setSelectedBoardFilter(item.globalIndex);
-                    setPan({ x: 0, y: 0 });
+                    containerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
                   }}
                   className={`px-2 py-1 rounded-lg text-[9px] sm:text-[10px] font-mono font-bold uppercase transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer ${selectedBoardFilter === item.globalIndex ? 'bg-[#f0a144] text-black shadow font-black' : 'bg-[#222222] text-[#888888] hover:text-white border border-[#333]'}`}
                   title={`${item.group.displayName} (${item.group.config.width}×${item.group.config.height} mm)`}
@@ -1295,8 +1532,8 @@ export default function CutPlanViewer({
               </div>
             </div>
 
-            {/* Zoom Control Buttons */}
-            <div className="flex items-center gap-1 bg-[#222222] border border-[#333333] p-0.5 rounded-lg shrink-0 select-none">
+            {/* Zoom Control Buttons (Hidden on mobile for clean UI, available on desktop) */}
+            <div className="hidden sm:flex items-center gap-1 bg-[#222222] border border-[#333333] p-0.5 rounded-lg shrink-0 select-none">
               <button 
                 type="button"
                 onClick={() => setZoom(z => Math.max(0.15, Number((z - 0.10).toFixed(2))))} 
@@ -1307,7 +1544,7 @@ export default function CutPlanViewer({
               </button>
               <button 
                 type="button"
-                onClick={() => { setZoom(0.35); setPan({ x: 0, y: 0 }); }} 
+                onClick={() => setZoom(0.35)} 
                 className="px-1.5 py-0.5 rounded text-white font-mono text-[10px] font-bold hover:bg-[#333333] transition-colors" 
                 title="Restablecer Zoom por defecto (35%)"
               >
@@ -1522,109 +1759,14 @@ export default function CutPlanViewer({
             </div>
           </div>
 
-          {/* Canvas Area with Wheel Zoom and Pan Drag */}
+          {/* Canvas Area with smooth vertical scrolling optimized for mobile & desktop */}
           <div 
-            className={`flex-1 overflow-hidden p-2 sm:p-6 relative select-none touch-none ${isPanning ? 'cursor-grabbing' : 'cursor-grab'}`} 
+            className="flex-1 overflow-y-auto overflow-x-auto p-2 sm:p-6 relative select-none touch-pan-y overscroll-contain" 
             ref={containerRef}
-            onMouseDown={handleCanvasMouseDown}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={handleCanvasMouseUp}
-            onMouseLeave={handleCanvasMouseUp}
+            onDoubleClick={handleFitToScreen}
           >
-            {/* Minimalist Pan & Zoom Indicator */}
-            <div className="absolute top-3 left-3 z-20 pointer-events-none bg-[#181818]/90 backdrop-blur border border-[#333333] px-2.5 py-1 rounded-md text-[9px] font-mono text-[#888] hidden sm:flex items-center gap-2 shadow-lg">
-              <span className="text-[#f0a144]">Zoom:</span>
-              <span className="text-white font-bold">{Math.round(zoom * 100)}%</span>
-              <span className="text-[#555]">•</span>
-              <span>{wheelMode === 'scroll' ? '🖱️ Rueda: Desplazar (Ctrl+Rueda: Zoom)' : '🔍 Rueda: Zoom directo'}</span>
-              <span className="text-[#555]">•</span>
-              <span>👆 Táctil: 2 dedos zoom</span>
-            </div>
-
-            {/* Dynamic scroll hint toast when scrolling with wheel */}
-            {showZoomHint && wheelMode === 'scroll' && (
-              <div className="absolute top-11 left-3 z-20 pointer-events-none bg-black/85 backdrop-blur border border-[#444] px-2.5 py-1 rounded-md text-[9px] font-mono text-white animate-in fade-in duration-150 flex items-center gap-1.5 shadow-xl">
-                <span className="text-[#f0a144]">💡</span>
-                <span>Desplazando plano. Mantén <strong>Ctrl + Rueda</strong> para zoom con lupa</span>
-              </div>
-            )}
-
-            {/* Floating Zoom & Pan Navigation HUD */}
-            <div className="absolute bottom-4 right-4 z-30 flex items-center gap-1 bg-[#181818]/95 backdrop-blur-md border border-[#383838] p-1.5 rounded-xl shadow-2xl text-white select-none">
-              {/* Alejar / Lupa - */}
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.max(0.15, Number((z - 0.10).toFixed(2)))); }}
-                className="p-1.5 hover:bg-[#2d2d2d] active:bg-[#383838] rounded-lg text-[#aaa] hover:text-white transition-colors"
-                title="Alejar plano (Lupa -)"
-              >
-                <ZoomOut className="w-4 h-4" />
-              </button>
-
-              {/* Porcentaje actual y restablecer al 35% */}
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); setZoom(0.35); setPan({ x: 0, y: 0 }); }}
-                className="px-2 py-1 hover:bg-[#2d2d2d] rounded-lg text-white font-mono text-[11px] font-bold transition-colors"
-                title="Restablecer Zoom por defecto (35%) y centrar plano"
-              >
-                {Math.round(zoom * 100)}%
-              </button>
-
-              {/* Acercar / Lupa + */}
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); setZoom(z => Math.min(4.0, Number((z + 0.10).toFixed(2)))); }}
-                className="p-1.5 hover:bg-[#2d2d2d] active:bg-[#383838] rounded-lg text-[#aaa] hover:text-white transition-colors"
-                title="Acercar plano (Lupa +)"
-              >
-                <ZoomIn className="w-4 h-4" />
-              </button>
-
-              <div className="w-px h-4 bg-[#383838] mx-0.5" />
-
-              {/* Ajustar a la pantalla */}
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); handleFitToScreen(); }}
-                className="px-2 py-1 hover:bg-[#2d2d2d] rounded-lg text-[#f0a144] hover:text-white transition-colors flex items-center gap-1 text-[10px] font-bold"
-                title="Ajustar y maximizar plancha en pantalla"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Ajustar</span>
-              </button>
-
-              <div className="w-px h-4 bg-[#383838] mx-0.5" />
-
-              {/* Selector de modo rueda ratón */}
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setWheelMode(m => m === 'scroll' ? 'zoom' : 'scroll');
-                }}
-                className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold flex items-center gap-1 transition-all ${
-                  wheelMode === 'scroll'
-                    ? 'bg-[#252525] text-emerald-400 border border-emerald-500/30 hover:bg-[#2d2d2d]'
-                    : 'bg-[#f0a144] text-black hover:bg-[#ffb055]'
-                }`}
-                title={
-                  wheelMode === 'scroll'
-                    ? 'Modo Rueda: Desplazamiento natural (Usa Ctrl+Rueda o pulsa aquí para Zoom directo)'
-                    : 'Modo Rueda: Zoom directo (pulsa aquí para volver a Desplazamiento)'
-                }
-              >
-                <span>{wheelMode === 'scroll' ? '↕ Rueda: Desplazar' : '🔍 Rueda: Zoom'}</span>
-              </button>
-            </div>
-
-            {/* Boards Layout Container with Pan Transform */}
-            <div 
-              className="flex flex-col gap-6 sm:gap-8 w-full pb-16 transition-transform duration-75 origin-top-left items-center"
-              style={{
-                transform: `translate(${pan.x}px, ${pan.y}px)`
-              }}
-            >
+            {/* Boards Layout Container */}
+            <div className="flex flex-col gap-6 sm:gap-8 w-full pb-36 sm:pb-44 items-center">
               {boardsToRender.map((item) => {
                 const { group, board, boardNumber } = item;
                 const bWidth = group.config.width;
@@ -1893,48 +2035,144 @@ export default function CutPlanViewer({
                                             </>
                                           )}
 
-                                          {/* Edgeband Lines (Cantos: Red=Thick, Blue=Thin) */}
+                                          {/* Edgeband Lines (Cantos: Red=Thick, Blue=Thin) con etiquetas de borde A1, A2, L1, L2 */}
                                           {showEdgebandLines && (
                                             <g className="edgeband-lines pointer-events-none">
                                               {topCanto !== 'Ninguno' && (
-                                                <line 
-                                                  x1={rectX} 
-                                                  y1={rectY} 
-                                                  x2={rectX + rectW} 
-                                                  y2={rectY} 
-                                                  stroke={topCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={topCanto === 'Canto Grueso' ? 7 : 4.5} 
-                                                />
+                                                <g>
+                                                  <line 
+                                                    x1={rectX} 
+                                                    y1={rectY} 
+                                                    x2={rectX + rectW} 
+                                                    y2={rectY} 
+                                                    stroke={topCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
+                                                    strokeWidth={topCanto === 'Canto Grueso' ? 7 : 4.5} 
+                                                  />
+                                                  {rectW >= 36 && (
+                                                    <g transform={`translate(${cx}, ${rectY + 5.5})`} className="select-none">
+                                                      <rect
+                                                        x={-8.5}
+                                                        y={-4.5}
+                                                        width={17}
+                                                        height={9}
+                                                        rx={2}
+                                                        fill={topCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'}
+                                                      />
+                                                      <text
+                                                        textAnchor="middle"
+                                                        dominantBaseline="central"
+                                                        fill="#ffffff"
+                                                        fontSize={6.5}
+                                                        fontWeight="900"
+                                                        fontFamily="monospace"
+                                                      >
+                                                        {!rect.rotated ? 'L1' : 'A1'}
+                                                      </text>
+                                                    </g>
+                                                  )}
+                                                </g>
                                               )}
                                               {bottomCanto !== 'Ninguno' && (
-                                                <line 
-                                                  x1={rectX} 
-                                                  y1={rectY + rectH} 
-                                                  x2={rectX + rectW} 
-                                                  y2={rectY + rectH} 
-                                                  stroke={bottomCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={bottomCanto === 'Canto Grueso' ? 7 : 4.5} 
-                                                />
+                                                <g>
+                                                  <line 
+                                                    x1={rectX} 
+                                                    y1={rectY + rectH} 
+                                                    x2={rectX + rectW} 
+                                                    y2={rectY + rectH} 
+                                                    stroke={bottomCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
+                                                    strokeWidth={bottomCanto === 'Canto Grueso' ? 7 : 4.5} 
+                                                  />
+                                                  {rectW >= 36 && (
+                                                    <g transform={`translate(${cx}, ${rectY + rectH - 5.5})`} className="select-none">
+                                                      <rect
+                                                        x={-8.5}
+                                                        y={-4.5}
+                                                        width={17}
+                                                        height={9}
+                                                        rx={2}
+                                                        fill={bottomCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'}
+                                                      />
+                                                      <text
+                                                        textAnchor="middle"
+                                                        dominantBaseline="central"
+                                                        fill="#ffffff"
+                                                        fontSize={6.5}
+                                                        fontWeight="900"
+                                                        fontFamily="monospace"
+                                                      >
+                                                        {!rect.rotated ? 'L2' : 'A2'}
+                                                      </text>
+                                                    </g>
+                                                  )}
+                                                </g>
                                               )}
                                               {leftCanto !== 'Ninguno' && (
-                                                <line 
-                                                  x1={rectX} 
-                                                  y1={rectY} 
-                                                  x2={rectX} 
-                                                  y2={rectY + rectH} 
-                                                  stroke={leftCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={leftCanto === 'Canto Grueso' ? 7 : 4.5} 
-                                                />
+                                                <g>
+                                                  <line 
+                                                    x1={rectX} 
+                                                    y1={rectY} 
+                                                    x2={rectX} 
+                                                    y2={rectY + rectH} 
+                                                    stroke={leftCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
+                                                    strokeWidth={leftCanto === 'Canto Grueso' ? 7 : 4.5} 
+                                                  />
+                                                  {rectH >= 26 && (
+                                                    <g transform={`translate(${rectX + 6}, ${cy})`} className="select-none">
+                                                      <rect
+                                                        x={-8.5}
+                                                        y={-4.5}
+                                                        width={17}
+                                                        height={9}
+                                                        rx={2}
+                                                        fill={leftCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'}
+                                                      />
+                                                      <text
+                                                        textAnchor="middle"
+                                                        dominantBaseline="central"
+                                                        fill="#ffffff"
+                                                        fontSize={6.5}
+                                                        fontWeight="900"
+                                                        fontFamily="monospace"
+                                                      >
+                                                        {!rect.rotated ? 'A1' : 'L1'}
+                                                      </text>
+                                                    </g>
+                                                  )}
+                                                </g>
                                               )}
                                               {rightCanto !== 'Ninguno' && (
-                                                <line 
-                                                  x1={rectX + rectW} 
-                                                  y1={rectY} 
-                                                  x2={rectX + rectW} 
-                                                  y2={rectY + rectH} 
-                                                  stroke={rightCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
-                                                  strokeWidth={rightCanto === 'Canto Grueso' ? 7 : 4.5} 
-                                                />
+                                                <g>
+                                                  <line 
+                                                    x1={rectX + rectW} 
+                                                    y1={rectY} 
+                                                    x2={rectX + rectW} 
+                                                    y2={rectY + rectH} 
+                                                    stroke={rightCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'} 
+                                                    strokeWidth={rightCanto === 'Canto Grueso' ? 7 : 4.5} 
+                                                  />
+                                                  {rectH >= 26 && (
+                                                    <g transform={`translate(${rectX + rectW - 6}, ${cy})`} className="select-none">
+                                                      <rect
+                                                        x={-8.5}
+                                                        y={-4.5}
+                                                        width={17}
+                                                        height={9}
+                                                        rx={2}
+                                                        fill={rightCanto === 'Canto Grueso' ? '#dc2626' : '#2563eb'}
+                                                      />
+                                                      <text
+                                                        textAnchor="middle"
+                                                        dominantBaseline="central"
+                                                        fill="#ffffff"
+                                                        fontSize={6.5}
+                                                        fontWeight="900"
+                                                        fontFamily="monospace"
+                                                      >
+                                                        {!rect.rotated ? 'A2' : 'L2'}
+                                                      </text>
+                                                    </g>
+                                                  )}
+                                                </g>
                                               )}
                                             </g>
                                           )}
@@ -2044,28 +2282,95 @@ export default function CutPlanViewer({
                                                   fontWeight="bold"
                                                   className="font-mono opacity-65 uppercase tracking-wider select-none"
                                                 >
-                                                  {rect.substrateLabel || rect.materialName || 'MELAMINA'}
+                                                  {rect.isTransversal ? `${rect.substrateLabel || rect.materialName || 'MELAMINA'} • VETA 90°` : (rect.substrateLabel || rect.materialName || 'MELAMINA')}
                                                 </text>
                                               )}
+
+                                              {/* Cantos Badge on Piece: Muestra claramente los cantos aplicados (ej. C: A1) */}
+                                              {(() => {
+                                                const cList: string[] = [];
+                                                if (rect.cantos?.largo1 && rect.cantos.largo1 !== 'Ninguno') cList.push('L1');
+                                                if (rect.cantos?.largo2 && rect.cantos.largo2 !== 'Ninguno') cList.push('L2');
+                                                if (rect.cantos?.ancho1 && rect.cantos.ancho1 !== 'Ninguno') cList.push('A1');
+                                                if (rect.cantos?.ancho2 && rect.cantos.ancho2 !== 'Ninguno') cList.push('A2');
+                                                if (cList.length === 0 || rectW < 45 || rectH < 30) return null;
+                                                const hasThick = Object.values(rect.cantos || {}).some(v => v === 'Canto Grueso');
+                                                const badgeText = `C: ${cList.join('·')}`;
+                                                const badgeY = (showDims ? cy + (dimFontSize * 0.35) : cy) + (rectW > 70 && rectH > 52 ? (nameFontSize * 1.15) : (nameFontSize * 0.72));
+                                                return (
+                                                  <g className="piece-cantos-badge select-none pointer-events-none">
+                                                    <rect
+                                                      x={cx - (badgeText.length * 3.2 + 5)}
+                                                      y={badgeY - 5.5}
+                                                      width={badgeText.length * 6.4 + 10}
+                                                      height={11}
+                                                      rx={3}
+                                                      fill={hasThick ? '#450a0a' : '#172554'}
+                                                      stroke={hasThick ? '#dc2626' : '#2563eb'}
+                                                      strokeWidth={0.8}
+                                                    />
+                                                    <text
+                                                      x={cx}
+                                                      y={badgeY}
+                                                      textAnchor="middle"
+                                                      dominantBaseline="central"
+                                                      fill={hasThick ? '#fca5a5' : '#93c5fd'}
+                                                      fontSize={Math.max(7, Math.min(10, nameFontSize * 0.4))}
+                                                      fontWeight="900"
+                                                      fontFamily="monospace"
+                                                    >
+                                                      {badgeText}
+                                                    </text>
+                                                  </g>
+                                                );
+                                              })()}
                                             </g>
                                           )}
 
                                           {/* Grain Orientation Arrow indicator for workshop cuts */}
                                           {rect.veta && rectW > 50 && rectH > 35 && (
-                                            <g className="pointer-events-none select-none opacity-80">
-                                              <text
-                                                x={rectX + rectW - Math.max(16, dimFontSize * 0.65)}
-                                                y={rectY + Math.max(16, dimFontSize * 0.65)}
-                                                textAnchor="middle"
-                                                dominantBaseline="middle"
-                                                fill={dimColor}
-                                                fontSize={Math.max(12, dimFontSize * 0.55)}
-                                                fontWeight="bold"
-                                                className="font-mono"
-                                              >
-                                                <title>{rect.rotated ? "Veta horizontal (pieza girada 90°)" : "Veta vertical (sentido veta estándar)"}</title>
-                                                {rect.rotated ? '↔' : '↕'}
-                                              </text>
+                                            <g className="pointer-events-none select-none opacity-90">
+                                              {rect.isTransversal ? (
+                                                <g>
+                                                  <rect
+                                                    x={rectX + rectW - Math.max(34, dimFontSize * 1.3)}
+                                                    y={rectY + Math.max(4, dimFontSize * 0.15)}
+                                                    width={Math.max(30, dimFontSize * 1.15)}
+                                                    height={Math.max(14, dimFontSize * 0.55)}
+                                                    rx={2.5}
+                                                    fill="#b45309"
+                                                    stroke="#f59e0b"
+                                                    strokeWidth={0.8}
+                                                  />
+                                                  <text
+                                                    x={rectX + rectW - Math.max(19, dimFontSize * 0.72)}
+                                                    y={rectY + Math.max(11, dimFontSize * 0.42)}
+                                                    textAnchor="middle"
+                                                    dominantBaseline="middle"
+                                                    fill="#ffffff"
+                                                    fontSize={Math.max(7.5, dimFontSize * 0.38)}
+                                                    fontWeight="900"
+                                                    className="font-mono"
+                                                  >
+                                                    <title>Veta transversal rotada 90° para calzar en la plancha</title>
+                                                    90° ↕
+                                                  </text>
+                                                </g>
+                                              ) : (
+                                                <text
+                                                  x={rectX + rectW - Math.max(16, dimFontSize * 0.65)}
+                                                  y={rectY + Math.max(16, dimFontSize * 0.65)}
+                                                  textAnchor="middle"
+                                                  dominantBaseline="middle"
+                                                  fill={dimColor}
+                                                  fontSize={Math.max(12, dimFontSize * 0.55)}
+                                                  fontWeight="bold"
+                                                  className="font-mono"
+                                                >
+                                                  <title>{rect.rotated ? "Veta vertical (pieza girada 90°)" : "Veta horizontal (sentido veta estándar)"}</title>
+                                                  {rect.rotated ? '↕' : '↔'}
+                                                </text>
+                                              )}
                                             </g>
                                           )}
 
@@ -2092,6 +2397,41 @@ export default function CutPlanViewer({
                                               >
                                                 {rect.cutIndex}
                                               </text>
+                                            </g>
+                                          )}
+
+                                          {/* Botón interactivo para rotar pieza 90° directamente en el plano de corte */}
+                                          {(isHovered || isSelected) && rectW >= 36 && rectH >= 24 && (
+                                            <g
+                                              className="pointer-events-auto cursor-pointer group/rot"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleRotatePiece90(rect.id);
+                                              }}
+                                              transform={`translate(${rectX + rectW - Math.max(26, dimFontSize * 0.95)}, ${rectY + Math.max(3, dimFontSize * 0.12)})`}
+                                            >
+                                              <rect
+                                                width={Math.max(24, dimFontSize * 0.82)}
+                                                height={Math.max(24, dimFontSize * 0.82)}
+                                                rx={4}
+                                                fill="#f0a144"
+                                                stroke="#ffffff"
+                                                strokeWidth={1.5}
+                                                className="hover:scale-110 transition-transform shadow-md"
+                                              />
+                                              <text
+                                                x={Math.max(12, dimFontSize * 0.41)}
+                                                y={Math.max(12, dimFontSize * 0.41) + 1}
+                                                textAnchor="middle"
+                                                dominantBaseline="central"
+                                                fill="#000000"
+                                                fontSize={Math.max(14, dimFontSize * 0.52)}
+                                                fontWeight="900"
+                                                className="font-mono select-none"
+                                              >
+                                                ↻
+                                              </text>
+                                              <title>Rotar pieza 90° (intercambiar largo y ancho en el plano)</title>
                                             </g>
                                           )}
                                         </g>
@@ -2616,6 +2956,78 @@ export default function CutPlanViewer({
         boardGroups={boardGroups}
         totalStats={totalStats}
       />
+
+      {/* Barra Flotante de Acciones Rápidas (Rotar Pieza, Alternar Giro, Veta) al Seleccionar Pieza */}
+      {selectedPieceIds.length > 0 && (() => {
+        const activePiece = pieces.find(p => p.id === selectedPieceIds[0]);
+        if (!activePiece) return null;
+        const isTrans = activePiece.veta && (activePiece.vetaOrientacion === 'transversal' || activePiece.vetaRotation === 90);
+        return (
+          <div className="fixed bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-50 bg-[#14151e]/95 backdrop-blur-md border border-[#3b4058] rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.85)] px-3 py-2 flex items-center gap-2 text-xs text-white animate-in slide-in-from-bottom-2 duration-150 max-w-[95vw] overflow-x-auto [scrollbar-width:none]">
+            <div className="flex items-center gap-1.5 pr-2 border-r border-[#2d3148] shrink-0">
+              <Scissors className="w-3.5 h-3.5 text-[#f0a144]" />
+              <span className="font-bold truncate max-w-[110px] sm:max-w-[170px] text-gray-200">{activePiece.name}</span>
+              <span className="font-mono text-[11px] text-[#f0a144] font-black">
+                {Math.round(activePiece.largo)}×{Math.round(activePiece.ancho)} mm
+              </span>
+            </div>
+
+            {/* Botón Principal: Rotar 90° */}
+            <button
+              type="button"
+              onClick={() => handleRotatePiece90(activePiece.id)}
+              className="px-3 py-1.5 bg-[#f0a144] hover:bg-[#ffba66] text-black font-black rounded-xl flex items-center gap-1.5 transition-all active:scale-95 shadow-xs cursor-pointer shrink-0"
+              title="Girar pieza 90° en el plano de cortes (invierte largo y ancho y cantos)"
+            >
+              <RotateCw className="w-3.5 h-3.5 stroke-[2.5]" />
+              <span>Rotar 90°</span>
+            </button>
+
+            {/* Alternar Permiso de Rotación Automática */}
+            <button
+              type="button"
+              onClick={() => handleTogglePieceRotationPermit(activePiece.id)}
+              className={`px-2.5 py-1.5 rounded-xl border font-bold flex items-center gap-1 transition-all shrink-0 ${
+                activePiece.rotacion
+                  ? 'bg-blue-600/30 border-blue-400 text-blue-300 shadow-xs'
+                  : 'bg-[#1e2130] border-[#32364c] text-gray-400 hover:text-white'
+              }`}
+              title="Permitir que el optimizador gire automáticamente la pieza si reduce el desperdicio"
+            >
+              <Shuffle className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Giro Auto:</span>
+              <span className="font-mono">{activePiece.rotacion ? 'Sí' : 'No'}</span>
+            </button>
+
+            {/* Sentido de Veta */}
+            <button
+              type="button"
+              onClick={() => handleTogglePieceVeta(activePiece.id)}
+              className={`px-2.5 py-1.5 rounded-xl border font-bold flex items-center gap-1 transition-all shrink-0 ${
+                !activePiece.veta
+                  ? 'bg-[#1e2130] border-[#32364c] text-gray-400 hover:text-white'
+                  : isTrans
+                    ? 'bg-amber-950/70 border-amber-500 text-amber-300 font-black'
+                    : 'bg-emerald-950/70 border-emerald-500 text-emerald-300 font-black'
+              }`}
+              title="Alternar sentido de veta (0° longitudinal / 90° transversal / sin veta)"
+            >
+              <span className="font-mono">{!activePiece.veta ? 'Sin Veta' : isTrans ? 'Veta: 90° ↕' : 'Veta: 0° ↔'}</span>
+            </button>
+
+            {/* Deseleccionar */}
+            <button
+              type="button"
+              onClick={() => toggleSelection(activePiece.id, false)}
+              className="p-1 text-gray-400 hover:text-white rounded-lg hover:bg-white/10 shrink-0 ml-1"
+              title="Cerrar selección"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }
+

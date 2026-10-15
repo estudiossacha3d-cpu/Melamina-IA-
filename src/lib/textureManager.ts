@@ -326,7 +326,9 @@ export function getOrCreateThreeTexture(
   const repX = options?.repeatX !== undefined ? options.repeatX : 1;
   const repY = options?.repeatY !== undefined ? options.repeatY : 1;
   const rot = options?.rotation || 0;
-  const cacheKey = `${url}__rx${repX}__ry${repY}__rot${rot}`;
+  const offX = options?.offsetX || 0;
+  const offY = options?.offsetY || 0;
+  const cacheKey = `${url}__rx${repX}__ry${repY}__rot${rot}__ox${offX}__oy${offY}`;
 
   const cached = textureCache.get(cacheKey);
   if (cached) {
@@ -345,6 +347,7 @@ export function getOrCreateThreeTexture(
       t.wrapS = THREE.RepeatWrapping;
       t.wrapT = THREE.RepeatWrapping;
       t.repeat.set(repX, repY);
+      t.offset.set(offX, offY);
       t.center.set(0.5, 0.5);
       t.rotation = THREE.MathUtils.degToRad(rot || 0);
       t.colorSpace = THREE.SRGBColorSpace;
@@ -360,6 +363,7 @@ export function getOrCreateThreeTexture(
   texture.wrapS = THREE.RepeatWrapping;
   texture.wrapT = THREE.RepeatWrapping;
   texture.repeat.set(repX, repY);
+  texture.offset.set(offX, offY);
   texture.center.set(0.5, 0.5);
   texture.rotation = THREE.MathUtils.degToRad(rot || 0);
   texture.colorSpace = THREE.SRGBColorSpace;

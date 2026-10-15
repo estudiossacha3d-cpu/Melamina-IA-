@@ -104,6 +104,31 @@ function PieceMesh({
         threshold={15}
         color={isHighlighted ? '#ffffff' : hovered ? '#f0a144' : '#1e1e1e'}
       />
+
+      {/* Modern 3D Handle (Tirador) for doors */}
+      {(piece.isDoor || piece.name.toLowerCase().includes('puerta')) && (
+        <group>
+          {(() => {
+            const isLeftHinge = piece.doorHingeSide === 'left' || piece.name.toLowerCase().includes('izq');
+            const handleZ = isLeftHinge ? (piece.ancho / 2 - 28) : -(piece.ancho / 2 - 28);
+            const isBottomDoor = piece.name.toLowerCase().includes('inf');
+            const isTopDoor = piece.name.toLowerCase().includes('sup');
+            const handleX = isBottomDoor ? piece.largo * 0.32 : isTopDoor ? -piece.largo * 0.32 : 0;
+            const handleY = piece.espesor / 2 + 7;
+
+            return (
+              <mesh position={[handleX, handleY, handleZ]}>
+                <boxGeometry args={[Math.min(140, Math.max(80, piece.largo * 0.18)), 12, 14]} />
+                <meshStandardMaterial
+                  color="#1c1c1f"
+                  roughness={0.25}
+                  metalness={0.85}
+                />
+              </mesh>
+            );
+          })()}
+        </group>
+      )}
     </mesh>
   );
 }
@@ -243,11 +268,26 @@ export default function Warehouse3DPreview({
     >
       <CanvasErrorBoundary>
         <Canvas
+          frameloop={internalAutoRotate ? 'always' : 'demand'}
           camera={{
             position: [cameraDistance * 0.85, cameraDistance * 0.65, cameraDistance * 1.1],
             fov: 35,
             near: 1,
             far: cameraDistance * 20
+          }}
+          gl={{
+            antialias: true,
+            alpha: true,
+            powerPreference: 'low-power',
+            preserveDrawingBuffer: false
+          }}
+          onCreated={({ gl }) => {
+            const dom = gl.domElement;
+            const handleContextLost = (e: Event) => {
+              e.preventDefault();
+              console.warn('Warehouse3DPreview WebGL context lost handled gracefully.');
+            };
+            dom.addEventListener('webglcontextlost', handleContextLost, false);
           }}
           className="w-full h-full cursor-grab active:cursor-grabbing"
         >

@@ -21,41 +21,12 @@ export interface PackedBoardResult {
   stats: { efficiency: number; areaUsed: number; totalArea: number };
 }
 
-export interface PackingItem<TMeta = unknown> {
+interface PendingItem {
   w: number;
   h: number;
   id: string;
   name: string;
-  canRotate: boolean;
-  meta: TMeta;
-}
-
-export interface PackingPlacement<TMeta = unknown> {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  id: string;
-  name: string;
-  rotated: boolean;
-  cutIndex: number;
-  meta: TMeta;
-}
-
-export interface PackingBoard<TMeta = unknown> {
-  boardIndex: number;
-  rects: PackingPlacement<TMeta>[];
-  wasteRects: { x: number; y: number; w: number; h: number; isMargin?: boolean }[];
-  stats: { efficiency: number; areaUsed: number; totalArea: number };
-}
-
-export interface PackingResult<TMeta = unknown> {
-  boards: PackingBoard<TMeta>[];
-  unplaced: PackingItem<TMeta>[];
-  stats: { efficiency: number; areaUsed: number; totalArea: number; boardsCount: number };
-}
-
-interface PiecePackingMeta {
+  veta: boolean;
   cantos: Piece['cantos'];
   material: string;
   espesor: number;
@@ -71,11 +42,28 @@ interface FreeSpace {
 type SortMode = 'area' | 'long-side' | 'width' | 'perimeter';
 type SplitMode = 'balanced' | 'wide';
 
-const sortPending = <TMeta>(items: PackingItem<TMeta>[], mode: SortMode) => [...items].sort((a, b) => {
+const sortPending = (items: PendingItem[], mode: SortMode) => [...items].sort((a, b) => {
   if (mode === 'long-side') return Math.max(b.w, b.h) - Math.max(a.w, a.h) || (b.w * b.h) - (a.w * a.h);
   if (mode === 'width') return b.w - a.w || b.h - a.h;
   if (mode === 'perimeter') return (b.w + b.h) - (a.w + a.h) || (b.w * b.h) - (a.w * a.h);
   return (b.w * b.h) - (a.w * a.h) || Math.max(b.w, b.h) - Math.max(a.w, a.h);
+});
+
+const flattenPieces = (pieces: Piece[]): PendingItem[] => pieces.flatMap(piece => {
+  const isTransversal = Boolean(piece.veta && (piece.vetaOrientacion === 'transversal' || piece.vetaRotation === 90 || piece.vetaRotation === 270));
+  const w = isTransversal ? Math.max(0, piece.ancho) : Math.max(0, piece.largo);
+  const h = isTransversal ? Math.max(0, piece.largo) : Math.max(0, piece.ancho);
+  const name = isTransversal ? `${piece.name || 'Pieza'} (Veta 90°)` : (piece.name || 'Pieza sin nombre');
+  return Array.from({ length: Math.max(0, Math.floor(piece.cantidad || 0)) }, () => ({
+    w,
+    h,
+    id: piece.id,
+    name,
+    veta: Boolean(piece.veta),
+    cantos: piece.cantos,
+    material: piece.material || 'MELAMINA',
+    espesor: piece.espesor || 18,
+  }));
 });
 
 const addBoardMargins = (config: SheetConfig) => {
@@ -109,12 +97,7 @@ const splitSpace = (space: FreeSpace, placedW: number, placedH: number, kerf: nu
   return candidates.filter(candidate => candidate.w > 0 && candidate.h > 0);
 };
 
-const packVariant = <TMeta>(
-  source: PackingItem<TMeta>[],
-  config: SheetConfig,
-  sortMode: SortMode,
-  splitMode: SplitMode,
-): PackingResult<TMeta> => {
+const packVariant = (source: PendingItem[], config: SheetConfig, sortMode: SortMode, splitMode: SplitMode) => {
   const width = Math.max(0, config.width);
   const height = Math.max(0, config.height);
   const kerf = Math.max(0, config.kerf);
@@ -122,20 +105,20 @@ const packVariant = <TMeta>(
   const usableW = width - margin * 2;
   const usableH = height - margin * 2;
   const pending = sortPending(source, sortMode);
-  const boards: PackingBoard<TMeta>[] = [];
-  const unplaced: PackingItem<TMeta>[] = [];
+  const boards: PackedBoardResult[] = [];
+  const unplaced: string[] = [];
   let areaUsed = 0;
 
   if (usableW <= 0 || usableH <= 0) {
     return {
       boards,
-      unplaced: pending,
+      unplaced: pending.map(item => `${item.name} (${item.w}×${item.h} mm)`),
       stats: { efficiency: 0, areaUsed: 0, totalArea: 0, boardsCount: 0 },
     };
   }
 
   while (pending.length > 0) {
-    const rects: PackingPlacement<TMeta>[] = [];
+    const rects: PackedRect[] = [];
     const spaces: FreeSpace[] = [{ x: margin, y: margin, w: usableW, h: usableH }];
 
     for (let itemIndex = 0; itemIndex < pending.length; itemIndex += 1) {
@@ -144,7 +127,7 @@ const packVariant = <TMeta>(
 
       spaces.forEach((space, spaceIndex) => {
         const orientations = [{ w: item.w, h: item.h, rotated: false }];
-        if (item.canRotate && item.w !== item.h) orientations.push({ w: item.h, h: item.w, rotated: true });
+        if (!item.veta && item.w !== item.h) orientations.push({ w: item.h, h: item.w, rotated: true });
 
         orientations.forEach(orientation => {
           if (orientation.w > space.w || orientation.h > space.h) return;
@@ -171,7 +154,9 @@ const packVariant = <TMeta>(
         name: item.name,
         rotated: selected.rotated,
         cutIndex: rects.length + 1,
-        meta: item.meta,
+        cantos: item.cantos,
+        material: item.material,
+        espesor: item.espesor,
       });
       areaUsed += placedW * placedH;
 
@@ -183,7 +168,7 @@ const packVariant = <TMeta>(
 
     if (rects.length === 0) {
       const rejected = pending.shift();
-      if (rejected) unplaced.push(rejected);
+      if (rejected) unplaced.push(`${rejected.name} (${rejected.w}×${rejected.h} mm)`);
       continue;
     }
 
@@ -219,10 +204,11 @@ const packVariant = <TMeta>(
 
 /**
  * Runs several guillotine strategies and keeps the result that uses the fewest
- * sheets. Every caller uses this same engine so the diagram, PDF and material
- * summary cannot disagree about rotation, kerf or board count.
+ * sheets. Grain-directed pieces are never rotated; kerf and trimming margins
+ * are reserved in every placement.
  */
-export function packRectangles<TMeta>(items: PackingItem<TMeta>[], config: SheetConfig): PackingResult<TMeta> {
+export function professionalPack(pieces: Piece[], config: SheetConfig) {
+  const items = flattenPieces(pieces);
   const variants = (['area', 'long-side', 'width', 'perimeter'] as SortMode[]).flatMap(sortMode => (
     (['balanced', 'wide'] as SplitMode[]).map(splitMode => packVariant(items, config, sortMode, splitMode))
   ));
@@ -236,45 +222,4 @@ export function packRectangles<TMeta>(items: PackingItem<TMeta>[], config: Sheet
     }
     return candidate.stats.efficiency > best.stats.efficiency ? candidate : best;
   }, variants[0] || packVariant(items, config, 'area', 'balanced'));
-}
-
-const flattenPieces = (pieces: Piece[]): PackingItem<PiecePackingMeta>[] => pieces.flatMap(piece => (
-  Array.from({ length: Math.max(0, Math.floor(piece.cantidad || 0)) }, () => ({
-    w: Math.max(0, piece.largo),
-    h: Math.max(0, piece.ancho),
-    id: piece.id,
-    name: piece.name || 'Pieza sin nombre',
-    canRotate: !piece.veta && piece.rotacion === true,
-    meta: {
-      cantos: piece.cantos,
-      material: piece.material || 'MELAMINA',
-      espesor: piece.espesor || 18,
-    },
-  }))
-));
-
-export function professionalPack(pieces: Piece[], config: SheetConfig) {
-  const packed = packRectangles(flattenPieces(pieces), config);
-  return {
-    boards: packed.boards.map(board => ({
-      boardIndex: board.boardIndex,
-      rects: board.rects.map(rect => ({
-        x: rect.x,
-        y: rect.y,
-        w: rect.w,
-        h: rect.h,
-        id: rect.id,
-        name: rect.name,
-        rotated: rect.rotated,
-        cutIndex: rect.cutIndex,
-        cantos: rect.meta.cantos,
-        material: rect.meta.material,
-        espesor: rect.meta.espesor,
-      })),
-      wasteRects: board.wasteRects,
-      stats: board.stats,
-    })) satisfies PackedBoardResult[],
-    unplaced: packed.unplaced.map(item => `${item.name} (${item.w}×${item.h} mm)`),
-    stats: packed.stats,
-  };
 }

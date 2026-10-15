@@ -1,13 +1,15 @@
 import React, { useRef, useState, useMemo, useEffect, useCallback } from 'react';
-import { Canvas, useThree } from '@react-three/fiber';
+import { Canvas, useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls, TransformControls, Edges } from '@react-three/drei';
 import * as THREE from 'three';
+import { MousePointerSquareDashed } from 'lucide-react';
 import { Piece, EdgeThicknessConfig, PieceFaceKey, FaceTextureOptions, Group3D } from '../types';
 import { getOrCreateThreeTexture, getPelikanoTextureUrl } from '../lib/textureManager';
 import CanvasErrorBoundary from './CanvasErrorBoundary';
 import FaceTextureGizmo from './FaceTextureGizmo';
 import { FredoScaleGizmo } from './FredoScaleGizmo';
 import { FredoStretchAxis, FredoStretchMode, calculateFredoStretch } from '../lib/fredoStretch';
+import { createGroovedPieceGeometry } from '../lib/pieceGeometry';
 
 import { 
   MATERIAL_MAP, 
@@ -25,7 +27,6 @@ interface ThreeViewerProps {
   selectedPieceIds: string[];
   groups?: Group3D[];
   onSelectPiece: (id: string | null, multi: boolean) => void;
-  onLongPressPiece?: (pieceId: string) => void;
   onUpdatePieceTransform: (id: string, position: [number, number, number], rotation: [number, number, number]) => void;
   onUpdateMultiplePiecesTransform?: (updates: { id: string; position: [number, number, number]; rotation: [number, number, number] }[]) => void;
   onUpdatePieceScale?: (id: string, scaleX: number, scaleY: number, scaleZ: number) => void;
@@ -46,6 +47,8 @@ interface ThreeViewerProps {
   dimensionSide?: 'pos' | 'neg';
   anchorMode?: 'single' | 'center';
   snapActive?: boolean;
+  floorSnapActive?: boolean;
+  pieceSnapActive?: boolean;
   onUnusedScale?: any;
   edgeThicknessConfig?: EdgeThicknessConfig;
   activeTextureFace?: PieceFaceKey | 'all';
@@ -53,6 +56,12 @@ interface ThreeViewerProps {
   isTextureModalOpen?: boolean;
   onCanvasPointerDown?: () => void;
   editingGroupId?: string | null;
+  isBoxSelectActive?: boolean;
+  onToggleBoxSelect?: () => void;
+  isBoxSelectAdditive?: boolean;
+  onSelectPieceIds?: (ids: string[]) => void;
+  onSelectAllPieces?: () => void;
+  onClearSelection?: () => void;
 }
 
 
@@ -98,33 +107,37 @@ const DimensionHandle: React.FC<DimensionHandleProps> = ({
   onSelectSide
 }) => {
   const [hovered, setHovered] = useState(false);
+  const hitMeshRef = useRef<THREE.Mesh>(null);
+
+  // Top-priority raycasting override: assigns an ultra-near distance (0.000001) so R3F event processing
+  // guarantees this handle always sorts first over any occluding panels, backboards (respaldos), or laterals.
+  useEffect(() => {
+    const mesh = hitMeshRef.current;
+    if (!mesh) return;
+    mesh.raycast = function(raycaster, intersects) {
+      const localIntersects: THREE.Intersection[] = [];
+      THREE.Mesh.prototype.raycast.call(this, raycaster, localIntersects);
+      for (const hit of localIntersects) {
+        hit.distance = 0.000001;
+        intersects.push(hit);
+      }
+    };
+  }, []);
 
   return (
     <group position={position}>
-      {/* Visual connector line to piece edge */}
+      {/* 1. Large touch & pointer hit zone (220mm, visible to Three.js raycaster, ultra-near distance) */}
       <mesh
-        position={[
-          axis === 'largo' ? (side === 'pos' ? -0.013 : 0.013) : 0,
-          axis === 'espesor' ? (side === 'pos' ? -0.013 : 0.013) : 0,
-          axis === 'ancho' ? (side === 'pos' ? -0.013 : 0.013) : 0
-        ]}
-      >
-        <boxGeometry
-          args={[
-            axis === 'largo' ? 0.026 : 0.002,
-            axis === 'espesor' ? 0.026 : 0.002,
-            axis === 'ancho' ? 0.026 : 0.002
-          ]}
-        />
-        <meshBasicMaterial color={isSnapped ? '#fbbf24' : color} opacity={isSnapped ? 0.9 : 0.6} transparent />
-      </mesh>
-
-      {/* Larger invisible hit area for comfortable touch on mobile devices (110mm / >44px) */}
-      <mesh
+        ref={hitMeshRef}
+        renderOrder={10005}
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
         onPointerDown={(e) => {
           e.stopPropagation();
+          const domTarget = e.nativeEvent?.target as HTMLElement | undefined;
           try {
-            (e.nativeEvent?.target as HTMLElement)?.setPointerCapture?.(e.pointerId);
+            domTarget?.setPointerCapture?.(e.pointerId);
           } catch {}
           onSelectSide(side);
           onStartDrag(e, axis, side);
@@ -140,22 +153,96 @@ const DimensionHandle: React.FC<DimensionHandleProps> = ({
           document.body.style.cursor = 'auto';
         }}
       >
-        <boxGeometry args={[0.11, 0.11, 0.11]} />
-        <meshBasicMaterial visible={false} />
+        <boxGeometry args={[0.22, 0.22, 0.22]} />
+        <meshBasicMaterial transparent opacity={0} depthTest={false} depthWrite={false} />
       </mesh>
 
-      {/* Visible Handle Cube with Magnetic Glow */}
-      <mesh scale={isSnapped ? [1.45, 1.45, 1.45] : hovered ? [1.3, 1.3, 1.3] : [1, 1, 1]}>
-        <boxGeometry args={[0.024, 0.024, 0.024]} />
+      {/* Decorative visual meshes have raycast={() => null} so they never compete with or shadow the hit zone */}
+      {/* Visual connector line to piece edge */}
+      <mesh
+        raycast={() => null}
+        renderOrder={9997}
+        position={[
+          axis === 'largo' ? (side === 'pos' ? -0.015 : 0.015) : 0,
+          axis === 'espesor' ? (side === 'pos' ? -0.015 : 0.015) : 0,
+          axis === 'ancho' ? (side === 'pos' ? -0.015 : 0.015) : 0
+        ]}
+      >
+        <boxGeometry
+          args={[
+            axis === 'largo' ? 0.03 : 0.0025,
+            axis === 'espesor' ? 0.03 : 0.0025,
+            axis === 'ancho' ? 0.03 : 0.0025
+          ]}
+        />
+        <meshBasicMaterial
+          color={isSnapped ? '#fbbf24' : color}
+          opacity={isSnapped ? 0.95 : hovered ? 0.85 : 0.6}
+          transparent
+          depthTest={false}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* X-Ray Ghost Pass: Always visible THROUGH any entity / board behind it */}
+      <mesh
+        raycast={() => null}
+        scale={isSnapped ? [1.5, 1.5, 1.5] : hovered ? [1.35, 1.35, 1.35] : [1, 1, 1]}
+        renderOrder={9998}
+      >
+        <boxGeometry args={[0.028, 0.028, 0.028]} />
+        <meshBasicMaterial
+          color={isSnapped ? '#fbbf24' : hovered ? '#ffffff' : color}
+          transparent
+          opacity={isSnapped ? 0.95 : hovered ? 0.95 : 0.75}
+          depthTest={false}
+          depthWrite={false}
+        />
+        <Edges
+          scale={1.03}
+          threshold={15}
+          renderOrder={9999}
+          color="#ffffff"
+        />
+      </mesh>
+
+      {/* Solid Shaded Pass: 3D lighting when in direct line of sight */}
+      <mesh
+        raycast={() => null}
+        scale={isSnapped ? [1.5, 1.5, 1.5] : hovered ? [1.35, 1.35, 1.35] : [1, 1, 1]}
+        renderOrder={10000}
+      >
+        <boxGeometry args={[0.028, 0.028, 0.028]} />
         <meshStandardMaterial
           color={isSnapped ? '#fbbf24' : hovered ? '#ffffff' : color}
           emissive={isSnapped ? '#f59e0b' : hovered ? color : '#000000'}
-          emissiveIntensity={isSnapped ? 0.9 : 0.6}
+          emissiveIntensity={isSnapped ? 0.95 : 0.6}
           roughness={0.2}
           metalness={0.25}
+          depthTest={true}
         />
-        <Edges scale={1.02} threshold={15} color={isSnapped ? '#ffffff' : hovered ? '#ffffff' : '#000000'} />
+        <Edges
+          scale={1.02}
+          threshold={15}
+          renderOrder={10001}
+          color={isSnapped ? '#ffffff' : hovered ? '#ffffff' : '#000000'}
+        />
       </mesh>
+
+      {/* Hover / Snap target halo */}
+      {(hovered || isSnapped) && (
+        <mesh raycast={() => null} renderOrder={10002} scale={[1.8, 1.8, 1.8]}>
+          <boxGeometry args={[0.03, 0.03, 0.03]} />
+          <meshBasicMaterial
+            color={isSnapped ? '#fbbf24' : '#ffffff'}
+            wireframe
+            depthTest={false}
+            depthWrite={false}
+            transparent
+            opacity={0.85}
+          />
+        </mesh>
+      )}
     </group>
   );
 };
@@ -164,7 +251,9 @@ interface DimensionSnapResult {
   delta: number;
   isSnapped: boolean;
   targetPieceId: string | null;
-  snapType?: 'step' | 'match' | 'face' | 'floor';
+  snapType?: 'step' | 'match' | 'face' | 'floor' | 'groove' | 'corner' | 'edge';
+  snapLabel?: string;
+  candidateId?: string;
 }
 
 function calculateDimensionSnap(
@@ -175,164 +264,303 @@ function calculateDimensionSnap(
   isSymmetric: boolean,
   piece: Piece,
   allPieces: Piece[],
-  group: THREE.Group
+  group: THREE.Group,
+  lastSnappedDelta?: number | null
 ): DimensionSnapResult {
   const minDim = axis === 'espesor' ? 1 : 10;
-  const rawTargetDim = Math.max(minDim, startDim + rawDeltaMm);
+  const isTouchDevice = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
 
   interface Candidate {
+    id: string;
     delta: number;
     threshold: number;
     priority: number;
     targetPieceId: string | null;
-    snapType: 'step' | 'match' | 'face' | 'floor';
+    snapType: 'step' | 'match' | 'face' | 'floor' | 'groove' | 'corner' | 'edge';
+    snapLabel?: string;
   }
 
-  const candidates: Candidate[] = [];
+  const rawCandidates: Candidate[] = [];
 
-  // 1. Grid / Standard Step Candidates
-  if (axis === 'espesor') {
-    const standardThicknesses = [3, 4, 5.5, 6, 9, 12, 15, 18, 19, 25, 30, 36];
-    for (const th of standardThicknesses) {
-      candidates.push({
-        delta: th - startDim,
-        threshold: 7,
-        priority: 3,
-        targetPieceId: null,
-        snapType: 'step'
-      });
-    }
-  } else {
-    // 10mm modular step
-    const step10 = Math.round(rawTargetDim / 10) * 10;
-    candidates.push({
-      delta: step10 - startDim,
-      threshold: 5,
-      priority: 1,
-      targetPieceId: null,
-      snapType: 'step'
-    });
-
-    // 50mm modular step (stronger magnet)
-    const step50 = Math.round(rawTargetDim / 50) * 50;
-    candidates.push({
-      delta: step50 - startDim,
-      threshold: 9,
-      priority: 2,
-      targetPieceId: null,
-      snapType: 'step'
-    });
-  }
-
-  // 2. Matching dimensions of other pieces in project
-  for (const other of allPieces) {
-    if (other.id === piece.id) continue;
-    // Same axis dimension match (e.g. aligning shelf length to side height or other shelf)
-    const otherSameDim = axis === 'largo' ? other.largo : (axis === 'ancho' ? other.ancho : other.espesor);
-    candidates.push({
-      delta: otherSameDim - startDim,
-      threshold: 12,
-      priority: 3,
-      targetPieceId: other.id,
-      snapType: 'match'
-    });
-
-    // Perpendicular dimension match (e.g. shelf length matching depth)
-    if (axis === 'largo') {
-      candidates.push({
-        delta: other.ancho - startDim,
-        threshold: 10,
-        priority: 3,
-        targetPieceId: other.id,
-        snapType: 'match'
-      });
-    } else if (axis === 'ancho') {
-      candidates.push({
-        delta: other.largo - startDim,
-        threshold: 10,
-        priority: 3,
-        targetPieceId: other.id,
-        snapType: 'match'
-      });
-    }
-  }
-
-  // 3. World Space Face Alignment with other pieces & floor
+  // Direction along which the active face moves in world space
   const localVec = axis === 'largo'
     ? new THREE.Vector3(1, 0, 0)
     : axis === 'espesor'
       ? new THREE.Vector3(0, 1, 0)
       : new THREE.Vector3(0, 0, 1);
-  const worldDir = localVec.clone().applyEuler(group.rotation).normalize();
+  const worldAxis = localVec.clone().applyEuler(group.rotation).normalize();
+  const sideMultiplier = side === 'pos' ? 1 : -1;
+  const faceNormalWorld = worldAxis.clone().multiplyScalar(sideMultiplier);
 
-  const absX = Math.abs(worldDir.x);
-  const absY = Math.abs(worldDir.y);
-  const absZ = Math.abs(worldDir.z);
+  // Initial face position in world space
+  const initialFaceLocal = new THREE.Vector3(0, 0, 0);
+  if (axis === 'largo') initialFaceLocal.x = (sideMultiplier * startDim / 2) * 0.001;
+  else if (axis === 'espesor') initialFaceLocal.y = (sideMultiplier * startDim / 2) * 0.001;
+  else initialFaceLocal.z = (sideMultiplier * startDim / 2) * 0.001;
+  const initialFaceWorld = group.localToWorld(initialFaceLocal.clone());
 
-  let primaryCoord: 'x' | 'y' | 'z' | null = null;
-  if (absX > 0.7) primaryCoord = 'x';
-  else if (absY > 0.7) primaryCoord = 'y';
-  else if (absZ > 0.7) primaryCoord = 'z';
+  // Growth factor: meters moved along faceNormalWorld per mm of dimension delta
+  const factor = (isSymmetric ? 0.5 : 1.0) * 0.001;
 
-  if (primaryCoord) {
-    const dirComponent = worldDir[primaryCoord];
-    const sideMultiplier = side === 'pos' ? 1 : -1;
-    const factor = sideMultiplier * (isSymmetric ? 0.5 : 1.0) * dirComponent * 0.001;
+  if (Math.abs(factor) > 0.00001) {
+    // 1. Floor snap (when extending downwards toward Y=0)
+    if (faceNormalWorld.y < -0.1) {
+      const floorDeltaMm = (0 - initialFaceWorld.y) / (faceNormalWorld.y * factor);
+      if (startDim + floorDeltaMm >= minDim) {
+        rawCandidates.push({
+          id: 'floor-y0',
+          delta: Math.round(floorDeltaMm),
+          threshold: isTouchDevice ? 32 : 22,
+          priority: 10,
+          targetPieceId: null,
+          snapType: 'floor',
+          snapLabel: 'Suelo (Y=0)'
+        });
+      }
+    }
 
-    if (Math.abs(factor) > 0.00001) {
-      const faceLocal = new THREE.Vector3(0, 0, 0);
-      if (axis === 'largo') faceLocal.x = (sideMultiplier * startDim / 2) * 0.001;
-      else if (axis === 'espesor') faceLocal.y = (sideMultiplier * startDim / 2) * 0.001;
-      else faceLocal.z = (sideMultiplier * startDim / 2) * 0.001;
+    const isPieceRespaldo = piece.name?.toLowerCase().includes('respaldo') ||
+                            piece.name?.toLowerCase().includes('fondo') ||
+                            piece.name?.toLowerCase().includes('back') ||
+                            piece.espesor <= 6;
 
-      const initialFaceWorld = group.localToWorld(faceLocal.clone());
-      const initialCoord = initialFaceWorld[primaryCoord];
+    // 2. Geometric Snapping against other pieces: FACES, CORNERS, EDGES, GROOVES
+    for (const other of allPieces) {
+      if (other.id === piece.id || other.hidden) continue;
 
-      // Snap to floor if vertical
-      if (primaryCoord === 'y') {
-        const floorDeltaMm = (0 - initialCoord) / factor;
-        if (startDim + floorDeltaMm >= minDim) {
-          candidates.push({
-            delta: Math.round(floorDeltaMm),
-            threshold: 16,
-            priority: 5,
-            targetPieceId: null,
-            snapType: 'floor'
-          });
+      const otherCenter = new THREE.Vector3(
+        other.position3D[0] * 0.001,
+        other.position3D[1] * 0.001,
+        other.position3D[2] * 0.001
+      );
+
+      // Only reject pieces that are unreasonably far in 3D space (> 4.5m)
+      if (otherCenter.distanceTo(group.position) > 4.5) continue;
+
+      const otherEuler = new THREE.Euler(other.rotation3D[0], other.rotation3D[1], other.rotation3D[2]);
+      const oHalfX = (other.largo / 2) * 0.001;
+      const oHalfY = (other.espesor / 2) * 0.001;
+      const oHalfZ = (other.ancho / 2) * 0.001;
+
+      const axisX = new THREE.Vector3(1, 0, 0).applyEuler(otherEuler).normalize();
+      const axisY = new THREE.Vector3(0, 1, 0).applyEuler(otherEuler).normalize();
+      const axisZ = new THREE.Vector3(0, 0, 1).applyEuler(otherEuler).normalize();
+
+      const isOtherRespaldo = other.name?.toLowerCase().includes('respaldo') ||
+                              other.name?.toLowerCase().includes('fondo') ||
+                              other.name?.toLowerCase().includes('back') ||
+                              other.espesor <= 6;
+
+      // Respaldo snapping has the highest priority and generous magnetic threshold
+      const isRespaldoMating = isPieceRespaldo || isOtherRespaldo;
+      const basePriority = isRespaldoMating ? 16 : 12;
+      const baseThreshold = isTouchDevice ? (isRespaldoMating ? 36 : 28) : (isRespaldoMating ? 26 : 20);
+
+      // A) PARALLEL FACES OF OTHER PIECE (Direct Face-to-Face contact or flush alignment)
+      const otherAxes = [
+        { v: axisX, half: oHalfX, name: 'Lateral' },
+        { v: axisY, half: oHalfY, name: 'Cara' },
+        { v: axisZ, half: oHalfZ, name: 'Canto' }
+      ];
+
+      for (const ax of otherAxes) {
+        const dot = ax.v.dot(faceNormalWorld);
+        // Only consider faces whose normal is parallel to our moving face normal
+        if (Math.abs(dot) > 0.8) {
+          for (const s of [-1, 1]) {
+            const facePoint = otherCenter.clone().addScaledVector(ax.v, s * ax.half);
+            const worldDist = facePoint.sub(initialFaceWorld).dot(faceNormalWorld);
+            const deltaMm = worldDist / factor;
+
+            if (startDim + deltaMm < minDim) continue;
+
+            const isContact = s * dot < 0; // Normals oppose: contact face
+            const faceLabel = isOtherRespaldo
+              ? (isContact ? `Cara interior Respaldo (${other.name})` : `Cara exterior Respaldo (${other.name})`)
+              : (isContact ? `Cara interior (${other.name})` : `Cara exterior enrasada (${other.name})`);
+
+            rawCandidates.push({
+              id: `${other.id}-face-${ax.name}-${s}`,
+              delta: Math.round(deltaMm),
+              threshold: baseThreshold,
+              priority: basePriority,
+              targetPieceId: other.id,
+              snapType: 'face',
+              snapLabel: faceLabel
+            });
+          }
         }
       }
 
-      // Snap to faces of other pieces
-      for (const other of allPieces) {
-        if (other.id === piece.id) continue;
-        const otherCenter = new THREE.Vector3(
-          other.position3D[0] * 0.001,
-          other.position3D[1] * 0.001,
-          other.position3D[2] * 0.001
-        );
-        const otherHalf = getGlobalHalfSizes(other.rotation3D, other.largo, other.espesor, other.ancho);
-        
-        const face1 = otherCenter[primaryCoord] - otherHalf[primaryCoord];
-        const face2 = otherCenter[primaryCoord] + otherHalf[primaryCoord];
-        const center = otherCenter[primaryCoord];
+      // B) CORNERS AND PERIMETER EDGES (Vértices y Bordes)
+      // Evaluate all 8 corners of other piece projected onto our face normal
+      for (const sx of [-1, 1]) {
+        for (const sy of [-1, 1]) {
+          for (const sz of [-1, 1]) {
+            const cornerPoint = otherCenter.clone()
+              .addScaledVector(axisX, sx * oHalfX)
+              .addScaledVector(axisY, sy * oHalfY)
+              .addScaledVector(axisZ, sz * oHalfZ);
+            const cDist = cornerPoint.sub(initialFaceWorld).dot(faceNormalWorld);
+            const cDeltaMm = cDist / factor;
+            if (startDim + cDeltaMm >= minDim) {
+              rawCandidates.push({
+                id: `${other.id}-c-${sx}-${sy}-${sz}`,
+                delta: Math.round(cDeltaMm),
+                threshold: baseThreshold - 2,
+                priority: basePriority - 2,
+                targetPieceId: other.id,
+                snapType: 'corner',
+                snapLabel: isOtherRespaldo ? `Borde/Esquina Respaldo (${other.name})` : `Borde/Esquina (${other.name})`
+              });
+            }
+          }
+        }
+      }
 
-        for (const targetW of [face1, face2, center]) {
-          const targetDeltaMm = (targetW - initialCoord) / factor;
-          if (startDim + targetDeltaMm >= minDim) {
-            candidates.push({
-              delta: Math.round(targetDeltaMm),
-              threshold: 16,
-              priority: 4,
+      // C) CNC GROOVE / RANURA TARGETS (for back panel insertion)
+      if (other.ranurado && other.ranuraConfig) {
+        const cfg = other.ranuraConfig;
+        const gDist = (cfg.dist || 18) * 0.001;
+        const gEsp = (cfg.esp || 4) * 0.001;
+        const gProf = (cfg.prof || 8) * 0.001;
+
+        if (cfg.lado === 'L2') {
+          // Rear groove along -axisZ
+          const gOuter = otherCenter.clone().addScaledVector(axisZ, -oHalfZ + gDist);
+          const gInner = otherCenter.clone().addScaledVector(axisZ, -oHalfZ + gDist + gEsp);
+          const gCenter = otherCenter.clone().addScaledVector(axisZ, -oHalfZ + gDist + gEsp / 2);
+
+          const dOuter = (gOuter.sub(initialFaceWorld).dot(faceNormalWorld)) / factor;
+          const dInner = (gInner.sub(initialFaceWorld).dot(faceNormalWorld)) / factor;
+          const dCenter = (gCenter.sub(initialFaceWorld).dot(faceNormalWorld)) / factor;
+
+          if (startDim + dOuter >= minDim) {
+            rawCandidates.push({
+              id: `${other.id}-groove-outer`,
+              delta: Math.round(dOuter),
+              threshold: baseThreshold + 2,
+              priority: 18,
               targetPieceId: other.id,
-              snapType: 'face'
+              snapType: 'groove',
+              snapLabel: `Ranura exterior (${other.name})`
             });
+          }
+          if (startDim + dInner >= minDim) {
+            rawCandidates.push({
+              id: `${other.id}-groove-inner`,
+              delta: Math.round(dInner),
+              threshold: baseThreshold + 2,
+              priority: 18,
+              targetPieceId: other.id,
+              snapType: 'groove',
+              snapLabel: `Ranura interior (${other.name})`
+            });
+          }
+          if (startDim + dCenter >= minDim) {
+            rawCandidates.push({
+              id: `${other.id}-groove-center`,
+              delta: Math.round(dCenter),
+              threshold: baseThreshold + 4,
+              priority: 19,
+              targetPieceId: other.id,
+              snapType: 'groove',
+              snapLabel: `Fondo de ranura (${other.name})`
+            });
+          }
+
+          // Groove bottom embedded in lateral wood
+          for (const s of [-1, 1]) {
+            const gBottom = otherCenter.clone().addScaledVector(axisX, s * (oHalfX - gProf));
+            const dBottom = (gBottom.sub(initialFaceWorld).dot(faceNormalWorld)) / factor;
+            if (startDim + dBottom >= minDim) {
+              rawCandidates.push({
+                id: `${other.id}-groove-bottom-${s}`,
+                delta: Math.round(dBottom),
+                threshold: baseThreshold + 2,
+                priority: 19,
+                targetPieceId: other.id,
+                snapType: 'groove',
+                snapLabel: `Fondo de ranura lateral (${other.name})`
+              });
+            }
           }
         }
       }
     }
   }
 
-  // 4. Evaluate candidates
+  // 3. Modular Steps (lowest priority, tight threshold, strictly secondary)
+  if (axis === 'espesor') {
+    const standardThicknesses = [3, 4, 5.5, 6, 9, 12, 15, 18, 19, 25, 30, 36];
+    for (const th of standardThicknesses) {
+      rawCandidates.push({
+        id: `th-${th}`,
+        delta: th - startDim,
+        threshold: 4,
+        priority: 3,
+        targetPieceId: null,
+        snapType: 'step',
+        snapLabel: `Espesor ${th}mm`
+      });
+    }
+  } else {
+    const rawTargetDim = startDim + rawDeltaMm;
+    const step10 = Math.round(rawTargetDim / 10) * 10;
+    rawCandidates.push({
+      id: `step10-${step10}`,
+      delta: step10 - startDim,
+      threshold: 3,
+      priority: 1,
+      targetPieceId: null,
+      snapType: 'step',
+      snapLabel: `${step10} mm (paso 10mm)`
+    });
+
+    const step50 = Math.round(rawTargetDim / 50) * 50;
+    rawCandidates.push({
+      id: `step50-${step50}`,
+      delta: step50 - startDim,
+      threshold: 5,
+      priority: 2,
+      targetPieceId: null,
+      snapType: 'step',
+      snapLabel: `${step50} mm (paso 50mm)`
+    });
+  }
+
+  // 4. DEDUPLICATION: Merge candidates that share the same delta (within 1mm)
+  // Keeps only the candidate with highest priority to prevent candidate collision and flickering
+  const sortedRaw = [...rawCandidates].sort((a, b) => b.priority - a.priority);
+  const candidates: Candidate[] = [];
+  for (const cand of sortedRaw) {
+    const duplicate = candidates.find(c => Math.abs(c.delta - cand.delta) <= 1);
+    if (!duplicate) {
+      candidates.push(cand);
+    }
+  }
+
+  // 5. ROCK-SOLID DELTA HYSTERESIS (Anti-Flicker)
+  // If previously snapped to a delta, stay locked until pulled past escape radius
+  if (lastSnappedDelta !== null && lastSnappedDelta !== undefined) {
+    const lockedCand = candidates.find(c => Math.abs(c.delta - lastSnappedDelta) <= 1.5);
+    if (lockedCand) {
+      const escapeThreshold = isTouchDevice ? 40 : 30;
+      const diff = Math.abs(rawDeltaMm - lockedCand.delta);
+      if (diff <= escapeThreshold) {
+        return {
+          delta: lockedCand.delta,
+          isSnapped: true,
+          targetPieceId: lockedCand.targetPieceId,
+          snapType: lockedCand.snapType,
+          snapLabel: lockedCand.snapLabel,
+          candidateId: lockedCand.id
+        };
+      }
+    }
+  }
+
+  // 6. Candidate Selection (Maximum priority and closest distance)
   let bestCandidate: Candidate | null = null;
   let minDiff = Infinity;
   let highestPriority = -1;
@@ -353,32 +581,18 @@ function calculateDimensionSnap(
     return {
       delta: Math.round(rawDeltaMm),
       isSnapped: false,
-      targetPieceId: null
+      targetPieceId: null,
+      candidateId: undefined
     };
   }
-
-  // 5. Magnetic well with soft touch release (no jerkiness)
-  const diff = rawDeltaMm - bestCandidate.delta;
-  const lockZone = 4; // 4mm full magnetic lock
-  if (Math.abs(diff) <= lockZone) {
-    return {
-      delta: bestCandidate.delta,
-      isSnapped: true,
-      targetPieceId: bestCandidate.targetPieceId,
-      snapType: bestCandidate.snapType
-    };
-  }
-
-  // Smooth attraction curve between lockZone and threshold
-  const normalized = (Math.abs(diff) - lockZone) / Math.max(1, bestCandidate.threshold - lockZone);
-  const smoothedDiff = Math.sign(diff) * (lockZone + (bestCandidate.threshold - lockZone) * Math.pow(normalized, 1.5));
-  const easedDelta = Math.round(bestCandidate.delta + smoothedDiff);
 
   return {
-    delta: Math.max(minDim - startDim, easedDelta),
+    delta: bestCandidate.delta,
     isSnapped: true,
     targetPieceId: bestCandidate.targetPieceId,
-    snapType: bestCandidate.snapType
+    snapType: bestCandidate.snapType,
+    snapLabel: bestCandidate.snapLabel,
+    candidateId: bestCandidate.id
   };
 }
 
@@ -398,11 +612,12 @@ const MelaminePiece = ({
   dimensionSide = 'pos',
   anchorMode = 'single',
   snapActive = false,
+  floorSnapActive = true,
+  pieceSnapActive = true,
   edgeThicknessConfig,
   activeTextureFace = 'all',
   onSelectTextureFace,
   isTextureModalOpen = false,
-  onLongPressPiece,
   registerPieceGroup
 }: {
   piece: Piece;
@@ -410,7 +625,6 @@ const MelaminePiece = ({
   isSelected: boolean;
   showControls: boolean;
   onClick: (e: any) => void;
-  onLongPressPiece?: (pieceId: string) => void;
   onTransformEnd: (pos: [number, number, number], rot: [number, number, number], scale: [number, number, number]) => void;
   onUpdateDimensions?: (dx: number, dy: number, dz: number, originOffset: [number, number, number]) => void;
   onDoubleClickPiece?: (id: string) => void;
@@ -420,6 +634,8 @@ const MelaminePiece = ({
   dimensionSide?: 'pos' | 'neg';
   anchorMode?: 'single' | 'center';
   snapActive?: boolean;
+  floorSnapActive?: boolean;
+  pieceSnapActive?: boolean;
   edgeThicknessConfig?: EdgeThicknessConfig;
   activeTextureFace?: PieceFaceKey | 'all';
   onSelectTextureFace?: (face: PieceFaceKey | 'all') => void;
@@ -428,6 +644,7 @@ const MelaminePiece = ({
 }) => {
   const [mesh, setMesh] = useState<THREE.Mesh | null>(null);
   const [group, setGroupState] = useState<THREE.Group | null>(null);
+  const activeDragAxisRef = useRef<string | null>(null);
   const setGroup = useCallback((g: THREE.Group | null) => {
     setGroupState(g);
     if (registerPieceGroup) {
@@ -451,17 +668,6 @@ const MelaminePiece = ({
   const initialRotRef = useRef(new THREE.Euler());
   const isDraggingRef = useRef(false);
   const [flash, setFlash] = useState(false);
-  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
-  const longPressTriggeredRef = useRef(false);
-
-  useEffect(() => {
-    return () => {
-      if (longPressTimerRef.current) {
-        clearTimeout(longPressTimerRef.current);
-      }
-    };
-  }, []);
   const [currentDims, setCurrentDims] = useState({
     largo: Math.round(piece.largo),
     ancho: Math.round(piece.ancho),
@@ -489,7 +695,23 @@ const MelaminePiece = ({
   const [displacement, setDisplacement] = useState<{ dx: number; dy: number; dz: number; dist: number } | null>(null);
 
   const [activeSnapHandle, setActiveSnapHandle] = useState<{ axis: string; side: string } | null>(null);
+  const activeSnapHandleRef = useRef<{ axis: string; side: string } | null>(null);
   const wasSnappedRef = useRef(false);
+  const lastSnappedDeltaRef = useRef<number | null>(null);
+  const lastSnapTargetIdRef = useRef<string | null>(null);
+
+  const isDimensionDraggingRef = useRef(false);
+  const dragScaleRef = useRef<[number, number, number]>([1, 1, 1]);
+  const dragPosRef = useRef<[number, number, number]>([0, 0, 0]);
+
+  // Anti-flicker: guarantees mesh keeps its live dragged scale and position on EVERY rendered Three.js frame,
+  // preventing React reconciliation from resetting mesh.position or scale between frames!
+  useFrame(() => {
+    if (isDimensionDraggingRef.current && mesh) {
+      mesh.scale.set(dragScaleRef.current[0], dragScaleRef.current[1], dragScaleRef.current[2]);
+      mesh.position.set(dragPosRef.current[0], dragPosRef.current[1], dragPosRef.current[2]);
+    }
+  });
 
   const { camera, raycaster, gl, invalidate } = useThree();
   const orbitControls = useThree((state) => state.controls) as any;
@@ -510,38 +732,72 @@ const MelaminePiece = ({
     }
 
     setCurrentDimensionSide(side);
+    isDimensionDraggingRef.current = true;
     wasSnappedRef.current = false;
+    lastSnappedDeltaRef.current = null;
+    lastSnapTargetIdRef.current = null;
+    activeSnapHandleRef.current = null;
+    dragScaleRef.current = [1, 1, 1];
+    dragPosRef.current = [0, 0, 0];
 
-    // Stable Drag Plane: contains the world axis of the dimension handle and is oriented towards the camera
+    const startLargo = piece.largo;
+    const startAncho = piece.ancho;
+    const startEspesor = piece.espesor;
+
+    // Stable 3D Axis Vector:
     const localAxis = axis === 'largo'
       ? new THREE.Vector3(1, 0, 0)
       : axis === 'espesor'
         ? new THREE.Vector3(0, 1, 0)
         : new THREE.Vector3(0, 0, 1);
     const worldAxis = localAxis.clone().applyEuler(group.rotation).normalize();
-    const camDir = camera.getWorldDirection(new THREE.Vector3());
 
-    let planeNormal = new THREE.Vector3().crossVectors(worldAxis, camDir);
+    // The line passes through the handle's initial position in world space:
+    const handleInitialLocal = new THREE.Vector3(
+      axis === 'largo' ? (side === 'pos' ? 1 : -1) * (startLargo * scale) / 2 : 0,
+      axis === 'espesor' ? (side === 'pos' ? 1 : -1) * (startEspesor * scale) / 2 : 0,
+      axis === 'ancho' ? (side === 'pos' ? 1 : -1) * (startAncho * scale) / 2 : 0
+    );
+    const P0 = group.localToWorld(handleInitialLocal.clone());
+    const v = worldAxis.clone().normalize();
+
+    // Stable Drag Plane Projection (CAD Industry Standard):
+    // Construct a plane containing world axis `v` through P0 that faces the camera.
+    // This provides 100% smooth, continuous, linear tracking with zero singularities or jitter!
+    const camDir = camera.getWorldDirection(new THREE.Vector3());
+    let planeNormal = new THREE.Vector3().crossVectors(v, camDir).normalize();
     if (planeNormal.lengthSq() < 0.001) {
-      planeNormal.copy(camDir).negate();
-    } else {
-      planeNormal.crossVectors(planeNormal, worldAxis).normalize();
+      planeNormal = new THREE.Vector3().crossVectors(v, camera.up).normalize();
     }
-    if (planeNormal.dot(camDir) > 0) {
+    planeNormal.cross(v).normalize();
+    // Ensure plane normal faces camera
+    if (planeNormal.dot(camera.position.clone().sub(P0)) < 0) {
       planeNormal.negate();
     }
+    const dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, P0);
 
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, group.position);
+    const projectNdcToAxisT = (ndcX: number, ndcY: number): number => {
+      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+      const hit = new THREE.Vector3();
+      if (raycaster.ray.intersectPlane(dragPlane, hit)) {
+        return hit.sub(P0).dot(v);
+      }
+      // Fallback: camera-facing plane through P0
+      const fallbackPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir.clone().negate(), P0);
+      if (raycaster.ray.intersectPlane(fallbackPlane, hit)) {
+        return hit.sub(P0).dot(v);
+      }
+      return 0;
+    };
 
-    // Initial hit in group local coordinates
-    const hitPoint = new THREE.Vector3();
-    raycaster.setFromCamera(e.pointer, camera);
-    raycaster.ray.intersectPlane(plane, hitPoint);
-    const initialHitLocal = group.worldToLocal(hitPoint.clone());
+    const nativeEvt = e.nativeEvent || e;
+    const clientX0 = nativeEvt.clientX !== undefined ? nativeEvt.clientX : 0;
+    const clientY0 = nativeEvt.clientY !== undefined ? nativeEvt.clientY : 0;
+    const rect = gl.domElement.getBoundingClientRect();
+    const ndcX0 = ((clientX0 - rect.left) / rect.width) * 2 - 1;
+    const ndcY0 = -(((clientY0 - rect.top) / rect.height) * 2 - 1);
+    const initialT = projectNdcToAxisT(ndcX0, ndcY0);
 
-    const startLargo = piece.largo;
-    const startAncho = piece.ancho;
-    const startEspesor = piece.espesor;
     let lastDLargo = 0;
     let lastDAncho = 0;
     let lastDEspesor = 0;
@@ -566,66 +822,64 @@ const MelaminePiece = ({
 
       isSymmetric = moveEvt.altKey || anchorMode === 'center';
 
-      const rect = gl.domElement.getBoundingClientRect();
-      const ndcX = ((moveEvt.clientX - rect.left) / rect.width) * 2 - 1;
-      const ndcY = -(((moveEvt.clientY - rect.top) / rect.height) * 2 - 1);
-      const pointer = new THREE.Vector2(ndcX, ndcY);
+      const clientX = moveEvt.clientX;
+      const clientY = moveEvt.clientY;
+      const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+      const currentT = projectNdcToAxisT(ndcX, ndcY);
 
-      raycaster.setFromCamera(pointer, camera);
-      const currentHit = new THREE.Vector3();
-      if (!raycaster.ray.intersectPlane(plane, currentHit)) return;
-
-      const currentHitLocal = group.worldToLocal(currentHit.clone());
-
-      let rawDeltaLocal = 0;
-      if (axis === 'largo') {
-        rawDeltaLocal = currentHitLocal.x - initialHitLocal.x;
-      } else if (axis === 'ancho') {
-        rawDeltaLocal = currentHitLocal.z - initialHitLocal.z;
-      } else if (axis === 'espesor') {
-        rawDeltaLocal = currentHitLocal.y - initialHitLocal.y;
-      }
-
-      const rawDeltaMm = (side === 'pos' ? rawDeltaLocal : -rawDeltaLocal) / scale;
+      const deltaMeters = currentT - initialT;
+      // When side === 'pos', moving along +worldAxis expands piece.
+      // When side === 'neg', moving along -worldAxis expands piece.
+      const rawDeltaMm = (side === 'pos' ? deltaMeters : -deltaMeters) / scale;
       const startDim = axis === 'largo' ? startLargo : (axis === 'ancho' ? startAncho : startEspesor);
 
       const snapResult = snapActive
-        ? calculateDimensionSnap(axis, side, rawDeltaMm, startDim, isSymmetric, piece, allPieces, group)
+        ? calculateDimensionSnap(axis, side, rawDeltaMm, startDim, isSymmetric, piece, allPieces, group, lastSnappedDeltaRef.current)
         : { delta: Math.round(rawDeltaMm), isSnapped: false, targetPieceId: null };
 
+      lastSnappedDeltaRef.current = snapResult.isSnapped ? snapResult.delta : null;
       const effectiveDelta = snapResult.delta;
 
       // Haptic feedback and visual magnet state on mobile / touch
       if (snapResult.isSnapped && !wasSnappedRef.current) {
         if (typeof navigator !== 'undefined' && navigator.vibrate) {
-          try { navigator.vibrate(10); } catch {}
+          try { navigator.vibrate(15); } catch {}
         }
       }
       wasSnappedRef.current = snapResult.isSnapped;
 
-      if (snapResult.targetPieceId) {
+      // Anti-flicker: only dispatch piece-snap-target when target actually changes
+      if (lastSnapTargetIdRef.current !== snapResult.targetPieceId) {
+        lastSnapTargetIdRef.current = snapResult.targetPieceId;
         window.dispatchEvent(new CustomEvent('piece-snap-target', {
-          detail: { active: true, targetId: snapResult.targetPieceId }
-        }));
-      } else {
-        window.dispatchEvent(new CustomEvent('piece-snap-target', {
-          detail: { active: false, targetId: null }
+          detail: { active: !!snapResult.targetPieceId, targetId: snapResult.targetPieceId }
         }));
       }
 
-      setActiveSnapHandle(snapResult.isSnapped ? { axis, side } : null);
+      // Anti-flicker: Only update React state when snap status transitions to avoid 120 re-renders/sec
+      const isNowSnapped = snapResult.isSnapped;
+      const currentlyActive = activeSnapHandleRef.current;
+      const shouldBeActive = isNowSnapped ? `${axis}-${side}` : null;
+      const currentActiveKey = currentlyActive ? `${currentlyActive.axis}-${currentlyActive.side}` : null;
+
+      if (shouldBeActive !== currentActiveKey) {
+        activeSnapHandleRef.current = isNowSnapped ? { axis, side } : null;
+        setActiveSnapHandle(activeSnapHandleRef.current);
+      }
 
       if (axis === 'largo') {
         lastDLargo = effectiveDelta;
         const scaleFactorX = Math.max(0.01, (startLargo + effectiveDelta) / startLargo);
-        mesh.scale.set(scaleFactorX, 1, 1);
-
+        dragScaleRef.current = [scaleFactorX, 1, 1];
         if (isSymmetric) {
-          mesh.position.set(0, 0, 0);
+          dragPosRef.current = [0, 0, 0];
         } else {
           const sign = side === 'neg' ? -1 : 1;
-          mesh.position.set(((sign * effectiveDelta / 2) * scale), 0, 0);
+          dragPosRef.current = [((sign * effectiveDelta / 2) * scale), 0, 0];
         }
+        mesh.scale.set(dragScaleRef.current[0], dragScaleRef.current[1], dragScaleRef.current[2]);
+        mesh.position.set(dragPosRef.current[0], dragPosRef.current[1], dragPosRef.current[2]);
 
         if (rafMoveId === null) {
           rafMoveId = requestAnimationFrame(() => {
@@ -638,6 +892,7 @@ const MelaminePiece = ({
                 delta: effectiveDelta,
                 isDragging: true,
                 isSnapped: snapResult.isSnapped,
+                snapLabel: snapResult.snapLabel,
                 pieceId: piece.id
               }
             }));
@@ -647,14 +902,15 @@ const MelaminePiece = ({
       } else if (axis === 'ancho') {
         lastDAncho = effectiveDelta;
         const scaleFactorZ = Math.max(0.01, (startAncho + effectiveDelta) / startAncho);
-        mesh.scale.set(1, 1, scaleFactorZ);
-
+        dragScaleRef.current = [1, 1, scaleFactorZ];
         if (isSymmetric) {
-          mesh.position.set(0, 0, 0);
+          dragPosRef.current = [0, 0, 0];
         } else {
           const sign = side === 'neg' ? -1 : 1;
-          mesh.position.set(0, 0, ((sign * effectiveDelta / 2) * scale));
+          dragPosRef.current = [0, 0, ((sign * effectiveDelta / 2) * scale)];
         }
+        mesh.scale.set(dragScaleRef.current[0], dragScaleRef.current[1], dragScaleRef.current[2]);
+        mesh.position.set(dragPosRef.current[0], dragPosRef.current[1], dragPosRef.current[2]);
 
         if (rafMoveId === null) {
           rafMoveId = requestAnimationFrame(() => {
@@ -667,6 +923,7 @@ const MelaminePiece = ({
                 delta: effectiveDelta,
                 isDragging: true,
                 isSnapped: snapResult.isSnapped,
+                snapLabel: snapResult.snapLabel,
                 pieceId: piece.id
               }
             }));
@@ -676,14 +933,15 @@ const MelaminePiece = ({
       } else if (axis === 'espesor') {
         lastDEspesor = effectiveDelta;
         const scaleFactorY = Math.max(0.01, (startEspesor + effectiveDelta) / startEspesor);
-        mesh.scale.set(1, scaleFactorY, 1);
-
+        dragScaleRef.current = [1, scaleFactorY, 1];
         if (isSymmetric) {
-          mesh.position.set(0, 0, 0);
+          dragPosRef.current = [0, 0, 0];
         } else {
           const sign = side === 'neg' ? -1 : 1;
-          mesh.position.set(0, ((sign * effectiveDelta / 2) * scale), 0);
+          dragPosRef.current = [0, ((sign * effectiveDelta / 2) * scale), 0];
         }
+        mesh.scale.set(dragScaleRef.current[0], dragScaleRef.current[1], dragScaleRef.current[2]);
+        mesh.position.set(dragPosRef.current[0], dragPosRef.current[1], dragPosRef.current[2]);
 
         if (rafMoveId === null) {
           rafMoveId = requestAnimationFrame(() => {
@@ -696,6 +954,7 @@ const MelaminePiece = ({
                 delta: effectiveDelta,
                 isDragging: true,
                 isSnapped: snapResult.isSnapped,
+                snapLabel: snapResult.snapLabel,
                 pieceId: piece.id
               }
             }));
@@ -710,8 +969,14 @@ const MelaminePiece = ({
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerUp);
 
+      isDimensionDraggingRef.current = false;
+      dragScaleRef.current = [1, 1, 1];
+      dragPosRef.current = [0, 0, 0];
+      activeSnapHandleRef.current = null;
       setActiveSnapHandle(null);
       wasSnappedRef.current = false;
+      lastSnappedDeltaRef.current = null;
+      lastSnapTargetIdRef.current = null;
       window.dispatchEvent(new CustomEvent('piece-snap-target', { detail: { active: false, targetId: null } }));
 
       if (orbitControls) {
@@ -812,7 +1077,7 @@ const MelaminePiece = ({
     setTimeout(() => setFlash(false), 300);
   };
 
-  const getSnappedPosition = (targetPos: THREE.Vector3) => {
+  const getSnappedPosition = (targetPos: THREE.Vector3, currentAxis?: string | null) => {
     let finalPos = targetPos.clone();
     let snapped = false;
     let targetPieceId: string | null = null;
@@ -822,54 +1087,95 @@ const MelaminePiece = ({
       return { finalPos, snapped, targetPieceId, isFloorSnapped };
     }
 
-    // 1) Magnetic Snap Candidates (Floor plane & other Pieces' Faces, Edges, Corners)
-    if (snapActive) {
-      const snapThreshold = 0.025; // 25mm magnet snap range (suave y preciso, sin tirones)
-      const floorSnapThreshold = 0.03; // 30mm magnet snap range para el suelo
+    const effectivePieceSnap = pieceSnapActive !== undefined ? pieceSnapActive : snapActive;
+    const effectiveFloorSnap = floorSnapActive !== undefined ? floorSnapActive : snapActive;
 
-      let bestX = finalPos.x;
-      let minDiffX = snapThreshold;
-      let snapTargetIdX: string | null = null;
+    // Detect active drag axes so non-dragged axes are firmly locked and cannot jitter or fight
+    let canMoveX = true;
+    let canMoveY = true;
+    let canMoveZ = true;
 
-      let bestY = finalPos.y;
-      let minDiffY = snapThreshold;
-      let snapTargetIdY: string | null = null;
-
-      let bestZ = finalPos.z;
-      let minDiffZ = snapThreshold;
-      let snapTargetIdZ: string | null = null;
-
-      // Floor snap evaluation: the piece's bottom face is at (finalPos.y - myHalf.y)
-      // Resting on the floor (Y = 0) corresponds to finalPos.y = myHalf.y
-      const floorDiff = Math.abs(finalPos.y - myHalf.y);
-      if (floorDiff <= floorSnapThreshold || finalPos.y < myHalf.y) {
-        bestY = myHalf.y;
-        minDiffY = floorDiff;
-        snapTargetIdY = 'floor';
-        isFloorSnapped = true;
+    if (currentAxis) {
+      const normAxis = currentAxis.toUpperCase();
+      if (normAxis === 'X') {
+        canMoveX = true; canMoveY = false; canMoveZ = false;
+      } else if (normAxis === 'Y') {
+        canMoveX = false; canMoveY = true; canMoveZ = false;
+      } else if (normAxis === 'Z') {
+        canMoveX = false; canMoveY = false; canMoveZ = true;
+      } else if (normAxis === 'XZ') {
+        canMoveX = true; canMoveY = false; canMoveZ = true;
+      } else if (normAxis === 'XY') {
+        canMoveX = true; canMoveY = true; canMoveZ = false;
+      } else if (normAxis === 'YZ') {
+        canMoveX = false; canMoveY = true; canMoveZ = true;
       }
+    } else if (initialPosRef.current) {
+      // Fallback check against initial position during drag
+      const deltaX = Math.abs(targetPos.x - initialPosRef.current.x);
+      const deltaY = Math.abs(targetPos.y - initialPosRef.current.y);
+      const deltaZ = Math.abs(targetPos.z - initialPosRef.current.z);
+      if (deltaX > 0.0005 && deltaY < 0.00005 && deltaZ < 0.00005) {
+        canMoveX = true; canMoveY = false; canMoveZ = false;
+      } else if (deltaY > 0.0005 && deltaX < 0.00005 && deltaZ < 0.00005) {
+        canMoveX = false; canMoveY = true; canMoveZ = false;
+      } else if (deltaZ > 0.0005 && deltaX < 0.00005 && deltaY < 0.00005) {
+        canMoveX = false; canMoveY = false; canMoveZ = true;
+      }
+    }
 
-      // Check other pieces if there are any
-      if (allPieces && allPieces.length > 1) {
-        for (const other of allPieces) {
-          if (other.id === piece.id) continue;
+    // Strictly lock non-active axes to prevent cross-axis jumping or accidental floor/piece conflicts
+    if (!canMoveX && initialPosRef.current) finalPos.x = initialPosRef.current.x;
+    if (!canMoveY && initialPosRef.current) finalPos.y = initialPosRef.current.y;
+    if (!canMoveZ && initialPosRef.current) finalPos.z = initialPosRef.current.z;
 
-          const otherCenter = new THREE.Vector3(
-            other.position3D[0] * scale,
-            other.position3D[1] * scale,
-            other.position3D[2] * scale
-          );
-          const otherHalf = getGlobalHalfSizes(other.rotation3D, other.largo, other.espesor, other.ancho);
+    const snapThreshold = 0.025; // 25mm magnet snap range
+    const floorSnapThreshold = 0.03; // 30mm magnet snap range for floor
 
-          // Compute minimum gap distance between bounding boxes
-          const dx = Math.max(0, Math.abs(finalPos.x - otherCenter.x) - (myHalf.x + otherHalf.x));
-          const dy = Math.max(0, Math.abs(finalPos.y - otherCenter.y) - (myHalf.y + otherHalf.y));
-          const dz = Math.max(0, Math.abs(finalPos.z - otherCenter.z) - (myHalf.z + otherHalf.z));
+    let bestX = finalPos.x;
+    let minDiffX = snapThreshold;
+    let snapTargetIdX: string | null = null;
 
-          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    let bestY = finalPos.y;
+    let minDiffY = snapThreshold;
+    let snapTargetIdY: string | null = null;
 
-          // If nearby (within 250mm)
-          if (dist < 0.25) {
+    let bestZ = finalPos.z;
+    let minDiffZ = snapThreshold;
+    let snapTargetIdZ: string | null = null;
+
+    // Floor snap candidate (only evaluated if Y can move and floor snap is active)
+    let floorCandidateY: number | null = null;
+    let floorDiff = Infinity;
+    if (effectiveFloorSnap && canMoveY) {
+      floorDiff = Math.abs(finalPos.y - myHalf.y);
+      if (floorDiff <= floorSnapThreshold || finalPos.y < myHalf.y) {
+        floorCandidateY = myHalf.y;
+      }
+    }
+
+    // 1) Magnetic Snap Candidates against other pieces
+    if (effectivePieceSnap && allPieces && allPieces.length > 1) {
+      for (const other of allPieces) {
+        if (other.id === piece.id || other.hidden) continue;
+
+        const otherCenter = new THREE.Vector3(
+          other.position3D[0] * scale,
+          other.position3D[1] * scale,
+          other.position3D[2] * scale
+        );
+        const otherHalf = getGlobalHalfSizes(other.rotation3D, other.largo, other.espesor, other.ancho);
+
+        // Compute minimum gap distance between bounding boxes
+        const gapX = Math.max(0, Math.abs(finalPos.x - otherCenter.x) - (myHalf.x + otherHalf.x));
+        const gapY = Math.max(0, Math.abs(finalPos.y - otherCenter.y) - (myHalf.y + otherHalf.y));
+        const gapZ = Math.max(0, Math.abs(finalPos.z - otherCenter.z) - (myHalf.z + otherHalf.z));
+
+        const dist = Math.sqrt(gapX * gapX + gapY * gapY + gapZ * gapZ);
+
+        // If nearby (within 250mm gap)
+        if (dist < 0.25) {
+          if (canMoveX) {
             // X Candidates: Contact faces, Flush edges, Center
             const candidatesX = [
               otherCenter.x - otherHalf.x - myHalf.x, // Contact Right-to-Left face
@@ -886,7 +1192,9 @@ const MelaminePiece = ({
                 snapTargetIdX = other.id;
               }
             }
+          }
 
+          if (canMoveY) {
             // Y Candidates: Contact faces, Flush edges, Center
             const candidatesY = [
               otherCenter.y - otherHalf.y - myHalf.y, // Contact Top-to-Bottom face
@@ -901,10 +1209,11 @@ const MelaminePiece = ({
                 minDiffY = diff;
                 bestY = val;
                 snapTargetIdY = other.id;
-                isFloorSnapped = false;
               }
             }
+          }
 
+          if (canMoveZ) {
             // Z Candidates: Contact faces, Flush edges, Center
             const candidatesZ = [
               otherCenter.z - otherHalf.z - myHalf.z, // Contact Front-to-Back face
@@ -924,26 +1233,52 @@ const MelaminePiece = ({
           }
         }
       }
+    }
 
-      if (bestX !== finalPos.x) {
-        finalPos.x = bestX;
-        snapped = true;
-        targetPieceId = snapTargetIdX;
-      }
-      if (bestY !== finalPos.y) {
+    // Harmonize Y between Piece Snap and Floor Snap without conflicts
+    if (canMoveY) {
+      if (floorCandidateY !== null && effectiveFloorSnap) {
+        if (snapTargetIdY && minDiffY < snapThreshold) {
+          // If piece snap candidate is closer to current pos than floor, snap to piece; otherwise snap to floor
+          if (minDiffY < floorDiff) {
+            finalPos.y = bestY;
+            snapped = true;
+            targetPieceId = snapTargetIdY;
+            isFloorSnapped = false;
+          } else {
+            finalPos.y = floorCandidateY;
+            snapped = true;
+            targetPieceId = 'floor';
+            isFloorSnapped = true;
+          }
+        } else {
+          finalPos.y = floorCandidateY;
+          snapped = true;
+          targetPieceId = 'floor';
+          isFloorSnapped = true;
+        }
+      } else if (snapTargetIdY && minDiffY < snapThreshold) {
         finalPos.y = bestY;
         snapped = true;
-        targetPieceId = snapTargetIdY || targetPieceId;
-      }
-      if (bestZ !== finalPos.z) {
-        finalPos.z = bestZ;
-        snapped = true;
-        targetPieceId = snapTargetIdZ || targetPieceId;
+        targetPieceId = snapTargetIdY;
+        isFloorSnapped = false;
       }
     }
 
-    // Floor barrier: piece bottom cannot sink below the floor (Y < 0) when snap is active
-    if (snapActive && finalPos.y < myHalf.y) {
+    if (canMoveX && bestX !== finalPos.x) {
+      finalPos.x = bestX;
+      snapped = true;
+      targetPieceId = snapTargetIdX || targetPieceId;
+    }
+
+    if (canMoveZ && bestZ !== finalPos.z) {
+      finalPos.z = bestZ;
+      snapped = true;
+      targetPieceId = snapTargetIdZ || targetPieceId;
+    }
+
+    // Floor barrier: piece bottom cannot sink below floor when floorSnapActive (and only if Y can move)
+    if (effectiveFloorSnap && canMoveY && finalPos.y < myHalf.y) {
       finalPos.y = myHalf.y;
       snapped = true;
       isFloorSnapped = true;
@@ -951,10 +1286,10 @@ const MelaminePiece = ({
     }
 
     // 2) Solid Physics Collision Prevention (No Penetration / Fusion)
-    // Ensures pieces behave like real solid 3D boards and cannot intersect
+    // Constrained to allowed movement axes to prevent cross-axis teleportation
     if (allPieces && allPieces.length > 1) {
       for (const other of allPieces) {
-        if (other.id === piece.id) continue;
+        if (other.id === piece.id || other.hidden) continue;
 
         const otherCenter = new THREE.Vector3(
           other.position3D[0] * scale,
@@ -971,30 +1306,79 @@ const MelaminePiece = ({
         const overlapY = (myHalf.y + otherHalf.y) - dy;
         const overlapZ = (myHalf.z + otherHalf.z) - dz;
 
-        // Soft epsilon (3mm) to detect actual interior penetration without micro-jittering during drag
+        // Soft epsilon (3mm) to detect actual interior penetration
         if (overlapX > 0.003 && overlapY > 0.003 && overlapZ > 0.003) {
-          // Resolve penetration by pushing out along axis with smallest penetration depth
-          if (overlapX <= overlapY && overlapX <= overlapZ) {
+          if (canMoveX && !canMoveY && !canMoveZ) {
+            // Pure X drag: resolve strictly on X
             finalPos.x = finalPos.x >= otherCenter.x
               ? otherCenter.x + otherHalf.x + myHalf.x
               : otherCenter.x - otherHalf.x - myHalf.x;
-          } else if (overlapY <= overlapX && overlapY <= overlapZ) {
+            snapped = true;
+            targetPieceId = other.id;
+          } else if (canMoveY && !canMoveX && !canMoveZ) {
+            // Pure Y drag: resolve strictly on Y
             finalPos.y = finalPos.y >= otherCenter.y
               ? otherCenter.y + otherHalf.y + myHalf.y
               : otherCenter.y - otherHalf.y - myHalf.y;
-          } else {
+            snapped = true;
+            targetPieceId = other.id;
+          } else if (canMoveZ && !canMoveX && !canMoveY) {
+            // Pure Z drag: resolve strictly on Z
             finalPos.z = finalPos.z >= otherCenter.z
               ? otherCenter.z + otherHalf.z + myHalf.z
               : otherCenter.z - otherHalf.z - myHalf.z;
+            snapped = true;
+            targetPieceId = other.id;
+          } else if (canMoveX && canMoveZ && !canMoveY) {
+            // Horizontal plane (XZ): only resolve along X or Z, never Y!
+            if (overlapX <= overlapZ) {
+              finalPos.x = finalPos.x >= otherCenter.x
+                ? otherCenter.x + otherHalf.x + myHalf.x
+                : otherCenter.x - otherHalf.x - myHalf.x;
+            } else {
+              finalPos.z = finalPos.z >= otherCenter.z
+                ? otherCenter.z + otherHalf.z + myHalf.z
+                : otherCenter.z - otherHalf.z - myHalf.z;
+            }
+            snapped = true;
+            targetPieceId = other.id;
+          } else {
+            // Multi-axis / Free 3D drag
+            const allowedOverlaps: { axis: 'x' | 'y' | 'z'; val: number }[] = [];
+            if (canMoveX) allowedOverlaps.push({ axis: 'x', val: overlapX });
+            if (canMoveY) allowedOverlaps.push({ axis: 'y', val: overlapY });
+            if (canMoveZ) allowedOverlaps.push({ axis: 'z', val: overlapZ });
+
+            allowedOverlaps.sort((a, b) => a.val - b.val);
+
+            let chosenAxis = allowedOverlaps[0]?.axis || 'x';
+            if (chosenAxis === 'y' && effectiveFloorSnap && finalPos.y < otherCenter.y) {
+              const nextOption = allowedOverlaps.find(o => o.axis !== 'y');
+              if (nextOption) chosenAxis = nextOption.axis;
+            }
+
+            if (chosenAxis === 'x') {
+              finalPos.x = finalPos.x >= otherCenter.x
+                ? otherCenter.x + otherHalf.x + myHalf.x
+                : otherCenter.x - otherHalf.x - myHalf.x;
+            } else if (chosenAxis === 'y') {
+              finalPos.y = finalPos.y >= otherCenter.y
+                ? otherCenter.y + otherHalf.y + myHalf.y
+                : otherCenter.y - otherHalf.y - myHalf.y;
+            } else {
+              finalPos.z = finalPos.z >= otherCenter.z
+                ? otherCenter.z + otherHalf.z + myHalf.z
+                : otherCenter.z - otherHalf.z - myHalf.z;
+            }
+            snapped = true;
+            targetPieceId = other.id;
           }
-          snapped = true;
-          targetPieceId = other.id;
         }
       }
     }
 
     // Final safety check for floor height
-    if (snapActive && finalPos.y < myHalf.y) {
+    if (effectiveFloorSnap && canMoveY && finalPos.y < myHalf.y) {
       finalPos.y = myHalf.y;
       isFloorSnapped = true;
     }
@@ -1003,6 +1387,9 @@ const MelaminePiece = ({
   };
 
   const handleTransformEnd = () => {
+    if (orbitControls) {
+      orbitControls.enabled = true;
+    }
     if (group) {
       let finalPos = group.position.clone();
       const finalRot = group.rotation.clone();
@@ -1033,7 +1420,8 @@ const MelaminePiece = ({
         window.dispatchEvent(new CustomEvent('piece-scaling-update', { detail: null }));
       } else {
         if (transformMode === 'translate') {
-           const { finalPos: snappedPos, snapped, targetPieceId, isFloorSnapped } = getSnappedPosition(finalPos);
+           const { finalPos: snappedPos, snapped, targetPieceId, isFloorSnapped } = getSnappedPosition(finalPos, activeDragAxisRef.current);
+           activeDragAxisRef.current = null;
 
            finalPos.copy(snappedPos);
            group.position.copy(finalPos);
@@ -1138,10 +1526,33 @@ const MelaminePiece = ({
       });
     };
 
-    const matL1 = createEdgeMat(piece.cantos.largo1);
-    const matL2 = createEdgeMat(piece.cantos.largo2);
-    const matA1 = createEdgeMat(piece.cantos.ancho1);
-    const matA2 = createEdgeMat(piece.cantos.ancho2);
+    // Reubicación dinámica: si la pieza es un divisor/separador vertical cuyo canto frontal
+    // Determina qué cara local del cubo 3D apunta hacia el frente expuesto (+Z global del mueble):
+    const rot = piece.rotation3D || [0, 0, 0];
+    const euler = new THREE.Euler(rot[0], rot[1], rot[2], 'XYZ');
+    const localXDir = new THREE.Vector3(1, 0, 0).applyEuler(euler);
+    const localZDir = new THREE.Vector3(0, 0, 1).applyEuler(euler);
+    const isLocalXFacingFront = Math.abs(localXDir.z - 1) < 0.1;
+    const isLocalZFacingFront = Math.abs(localZDir.z - 1) < 0.1;
+
+    let frontCantoType = piece.cantos?.largo1;
+    let rightCantoType = piece.cantos?.ancho1;
+
+    if (isLocalXFacingFront) {
+      // Cara +X (Ancho 1 / Face 0) apunta directamente al frente (+Z global):
+      // matA1 se muestra en el frente expuesto con el canto A1 (medida corta tierH)
+      rightCantoType = piece.cantos?.ancho1;
+      frontCantoType = piece.cantos?.largo1;
+    } else if (isLocalZFacingFront && piece.cantos?.largo1 === 'Ninguno' && piece.cantos?.ancho1 && piece.cantos?.ancho1 !== 'Ninguno') {
+      // Cara +Z (Largo 1 / Face 4) apunta al frente pero la indicación fue reubicada en Ancho 1
+      frontCantoType = piece.cantos?.ancho1;
+      rightCantoType = 'Ninguno';
+    }
+
+    const matL1 = createEdgeMat(frontCantoType);
+    const matL2 = createEdgeMat(piece.cantos?.largo2);
+    const matA1 = createEdgeMat(rightCantoType);
+    const matA2 = createEdgeMat(piece.cantos?.ancho2);
 
     // Apply custom face texture (photos / images or procedural wood grains)
     const getFaceMaterial = (faceKey: PieceFaceKey, fallbackMat: THREE.Material) => {
@@ -1155,6 +1566,8 @@ const MelaminePiece = ({
         const effectiveConfig: FaceTextureOptions = {
           repeatX: config?.repeatX !== undefined ? config.repeatX : 1,
           repeatY: config?.repeatY !== undefined ? config.repeatY : 1,
+          offsetX: config?.offsetX || 0,
+          offsetY: config?.offsetY || 0,
           rotation: effectiveRotation
         };
 
@@ -1203,17 +1616,67 @@ const MelaminePiece = ({
     invalidate
   ]);
 
+  // Memoized 3D geometry with physical CNC groove (ranurado) if active
+  const pieceGeometry = useMemo(() => {
+    if (!piece.ranurado) return null;
+    const cfg = piece.ranuraConfig || { lado: 'L2', dist: 18, esp: 4, prof: 8 };
+    return createGroovedPieceGeometry(
+      piece.largo * scale,
+      piece.espesor * scale,
+      piece.ancho * scale,
+      cfg,
+      scale
+    );
+  }, [
+    piece.ranurado,
+    piece.ranuraConfig?.lado,
+    piece.ranuraConfig?.dist,
+    piece.ranuraConfig?.esp,
+    piece.ranuraConfig?.prof,
+    piece.ranuraConfig?.cara,
+    piece.largo,
+    piece.espesor,
+    piece.ancho,
+    scale
+  ]);
+
   useEffect(() => {
-    if (mesh && materials) {
-      mesh.material = materials;
-      if (Array.isArray(materials)) {
-        materials.forEach(m => {
+    return () => {
+      if (pieceGeometry) {
+        pieceGeometry.dispose();
+      }
+    };
+  }, [pieceGeometry]);
+
+  const activeMaterials = useMemo<THREE.Material | THREE.Material[]>(() => {
+    if (!piece.ranurado) return materials;
+    if (Array.isArray(materials)) {
+      const melamineMat: THREE.Material = materials[2] || materials[0];
+      return [melamineMat, melamineMat];
+    }
+    return materials;
+  }, [piece.ranurado, materials]);
+
+  useEffect(() => {
+    if (mesh && activeMaterials) {
+      mesh.material = activeMaterials;
+      if (Array.isArray(activeMaterials)) {
+        activeMaterials.forEach((m: THREE.Material) => {
           m.needsUpdate = true;
         });
       }
       invalidate();
     }
-  }, [mesh, materials, invalidate]);
+  }, [mesh, activeMaterials, invalidate]);
+
+  useEffect(() => {
+    if (mesh) {
+      if (pieceGeometry) {
+        mesh.geometry = pieceGeometry;
+      }
+      invalidate();
+    }
+  }, [mesh, pieceGeometry, invalidate]);
 
   useEffect(() => {
     if (transformRef.current) {
@@ -1292,8 +1755,12 @@ const MelaminePiece = ({
 
     const handleMouseDown = () => {
       disableUnwantedHandles();
+      if (orbitControls) {
+        orbitControls.enabled = false;
+      }
       if (group && transformMode === 'translate') {
         isDraggingRef.current = true;
+        activeDragAxisRef.current = controls.axis || null;
         initialPosRef.current.copy(group.position);
         const zeroDisp = { dx: 0, dy: 0, dz: 0, dist: 0 };
         setDisplacement(zeroDisp);
@@ -1309,6 +1776,10 @@ const MelaminePiece = ({
     const handleDraggingChanged = (event: any) => {
       const dragging = !!event.value;
       if (dragging) {
+        if (orbitControls) {
+          orbitControls.enabled = false;
+        }
+        activeDragAxisRef.current = controls.axis || null;
         disableUnwantedHandles();
       }
       if (dragging && transformMode === 'translate') {
@@ -1340,8 +1811,12 @@ const MelaminePiece = ({
         };
         window.dispatchEvent(new CustomEvent('piece-scaling-update', { detail: zeroScale }));
       } else if (!dragging) {
+        if (orbitControls) {
+          orbitControls.enabled = true;
+        }
         isDraggingRef.current = false;
         setIsDraggingTranslate(false);
+        activeDragAxisRef.current = null;
         if (transformMode === 'translate' && group) {
           const dx = Math.round((group.position.x - initialPosRef.current.x) * 1000);
           const dy = Math.round((group.position.y - initialPosRef.current.y) * 1000);
@@ -1408,7 +1883,8 @@ const MelaminePiece = ({
       }
 
       if (transformMode === 'translate' && group && isDraggingRef.current) {
-        const { finalPos, snapped, targetPieceId, isFloorSnapped } = getSnappedPosition(group.position);
+        const currentAxis = controls.axis || activeDragAxisRef.current || null;
+        const { finalPos, snapped, targetPieceId, isFloorSnapped } = getSnappedPosition(group.position, currentAxis);
         if (snapped || finalPos.distanceToSquared(group.position) > 0.0000001) {
           group.position.copy(finalPos);
           if (targetPieceId && targetPieceId !== 'floor') {
@@ -1547,11 +2023,6 @@ const MelaminePiece = ({
           position={[0, 0, 0]}
           rotation={[0, 0, 0]}
           onClick={(e) => {
-            if (longPressTriggeredRef.current) {
-              longPressTriggeredRef.current = false;
-              e.stopPropagation();
-              return;
-            }
             e.stopPropagation();
             if (transformMode === 'texture' && e.face?.materialIndex !== undefined) {
               const faceIndexMap: PieceFaceKey[] = ['right', 'left', 'top', 'bottom', 'front', 'back'];
@@ -1566,21 +2037,6 @@ const MelaminePiece = ({
             onClick(e);
           }}
           onPointerDown={(e) => {
-            longPressTriggeredRef.current = false;
-            pointerStartRef.current = { x: e.clientX, y: e.clientY };
-
-            if (longPressTimerRef.current) {
-              clearTimeout(longPressTimerRef.current);
-            }
-
-            // Iniciar temporizador de 2 segundos (2000 ms) para empezar a agrupar
-            longPressTimerRef.current = setTimeout(() => {
-              longPressTriggeredRef.current = true;
-              if (onLongPressPiece) {
-                onLongPressPiece(piece.id);
-              }
-            }, 2000);
-
             if (transformMode === 'scale' && group) {
               const local = group.worldToLocal(e.point.clone());
               if (local.x < -0.005 || local.z < -0.005) {
@@ -1590,40 +2046,49 @@ const MelaminePiece = ({
               }
             }
           }}
-          onPointerMove={(e) => {
-            if (pointerStartRef.current && longPressTimerRef.current) {
-              const dx = e.clientX - pointerStartRef.current.x;
-              const dy = e.clientY - pointerStartRef.current.y;
-              if (Math.hypot(dx, dy) > 8) {
-                clearTimeout(longPressTimerRef.current);
-                longPressTimerRef.current = null;
-              }
-            }
-          }}
-          onPointerUp={() => {
-            if (longPressTimerRef.current) {
-              clearTimeout(longPressTimerRef.current);
-              longPressTimerRef.current = null;
-            }
-          }}
-          onPointerCancel={() => {
-            if (longPressTimerRef.current) {
-              clearTimeout(longPressTimerRef.current);
-              longPressTimerRef.current = null;
-            }
-          }}
           onDoubleClick={(e) => {
              e.stopPropagation();
+             if (e.point) {
+               window.dispatchEvent(new CustomEvent('focus-3d-point', { 
+                 detail: { point: { x: e.point.x, y: e.point.y, z: e.point.z } } 
+               }));
+             }
              window.dispatchEvent(new CustomEvent('request-transform-mode', { detail: 'scale' }));
              if (onDoubleClickPiece) {
                 onDoubleClickPiece(piece.id);
              }
           }}
-          material={materials}
+          material={activeMaterials}
+          geometry={pieceGeometry || undefined}
         >
-          <boxGeometry args={dims} />
-          <Edges scale={1} threshold={15} color={flash ? '#10b981' : isSnapTarget ? '#3b82f6' : isSelected ? '#f0a144' : '#111111'} />
+          {!pieceGeometry && <boxGeometry args={dims} />}
+          <Edges geometry={pieceGeometry || undefined} scale={1} threshold={15} color={flash ? '#10b981' : isSnapTarget ? '#3b82f6' : isSelected ? '#f0a144' : '#111111'} />
         </mesh>
+
+        {/* Modern 3D Handle (Tirador) for doors */}
+        {(piece.isDoor || piece.name.toLowerCase().includes('puerta')) && (
+          <group>
+            {(() => {
+              const isLeftHinge = piece.doorHingeSide === 'left' || piece.name.toLowerCase().includes('izq');
+              const handleZ = isLeftHinge ? (dims[2] / 2 - 0.028) : -(dims[2] / 2 - 0.028);
+              const isBottomDoor = piece.name.toLowerCase().includes('inf');
+              const isTopDoor = piece.name.toLowerCase().includes('sup');
+              const handleX = isBottomDoor ? dims[0] * 0.32 : isTopDoor ? -dims[0] * 0.32 : 0;
+              const handleY = dims[1] / 2 + 0.007;
+
+              return (
+                <mesh position={[handleX, handleY, handleZ]}>
+                  <boxGeometry args={[Math.min(0.14, Math.max(0.08, dims[0] * 0.18)), 0.012, 0.014]} />
+                  <meshStandardMaterial
+                    color="#1c1c1f"
+                    roughness={0.25}
+                    metalness={0.85}
+                  />
+                </mesh>
+              );
+            })()}
+          </group>
+        )}
 
         {/* Physical Canto Grueso bands (3mm) with realistic edge band appearance and joinery seams */}
         {(() => {
@@ -1643,9 +2108,27 @@ const MelaminePiece = ({
             metalness: (piece.customMetalness ?? 0.05)
           });
 
-          const hasL1Grueso = piece.cantos?.largo1 === 'Canto Grueso';
+          const rotBand = piece.rotation3D || [0, 0, 0];
+          const eulerBand = new THREE.Euler(rotBand[0], rotBand[1], rotBand[2], 'XYZ');
+          const localXDirBand = new THREE.Vector3(1, 0, 0).applyEuler(eulerBand);
+          const localZDirBand = new THREE.Vector3(0, 0, 1).applyEuler(eulerBand);
+          const isLocalXFacingFrontBand = Math.abs(localXDirBand.z - 1) < 0.1;
+          const isLocalZFacingFrontBand = Math.abs(localZDirBand.z - 1) < 0.1;
+
+          let frontVal = piece.cantos?.largo1;
+          let rightVal = piece.cantos?.ancho1;
+
+          if (isLocalXFacingFrontBand) {
+            rightVal = piece.cantos?.ancho1;
+            frontVal = piece.cantos?.largo1;
+          } else if (isLocalZFacingFrontBand && piece.cantos?.largo1 === 'Ninguno' && piece.cantos?.ancho1 && piece.cantos?.ancho1 !== 'Ninguno') {
+            frontVal = piece.cantos?.ancho1;
+            rightVal = 'Ninguno';
+          }
+
+          const hasL1Grueso = frontVal === 'Canto Grueso';
           const hasL2Grueso = piece.cantos?.largo2 === 'Canto Grueso';
-          const hasA1Grueso = piece.cantos?.ancho1 === 'Canto Grueso';
+          const hasA1Grueso = rightVal === 'Canto Grueso';
           const hasA2Grueso = piece.cantos?.ancho2 === 'Canto Grueso';
 
           if (!hasL1Grueso && !hasL2Grueso && !hasA1Grueso && !hasA2Grueso) return null;
@@ -1851,58 +2334,7 @@ const MelaminePiece = ({
           </>
         )}
 
-        {/* Render the groove visually if ranurado is active */}
-        {piece.ranurado && (() => {
-          const config = piece.ranuraConfig || { lado: 'L2', dist: 18, esp: 4, prof: 8 };
-          const lado = config.lado || 'L2';
-          const dist = (config.dist || 18) * scale;
-          const esp = (config.esp || 4) * scale;
-          const prof = (config.prof || 8) * scale;
-          
-          let gSize: [number, number, number] = [0, 0, 0];
-          let gPos: [number, number, number] = [0, 0, 0];
-          
-          const pLargo = piece.largo * scale;
-          const pEspesor = piece.espesor * scale;
-          const pAncho = piece.ancho * scale;
-          
-          if (lado === 'L1') { // Along Largo (X), near +Z face (Front)
-            gSize = [pLargo, prof + 0.0002, esp];
-            gPos = [
-              0, 
-              (pEspesor / 2) - (prof / 2) + 0.0001, 
-              (pAncho / 2) - dist - (esp / 2)
-            ];
-          } else if (lado === 'L2') { // Along Largo (X), near -Z face (Back)
-            gSize = [pLargo, prof + 0.0002, esp];
-            gPos = [
-              0, 
-              (pEspesor / 2) - (prof / 2) + 0.0001, 
-              -(pAncho / 2) + dist + (esp / 2)
-            ];
-          } else if (lado === 'A1') { // Along Ancho (Z), near +X face (Right)
-            gSize = [esp, prof + 0.0002, pAncho];
-            gPos = [
-              (pLargo / 2) - dist - (esp / 2), 
-              (pEspesor / 2) - (prof / 2) + 0.0001, 
-              0
-            ];
-          } else if (lado === 'A2') { // Along Ancho (Z), near -X face (Left)
-            gSize = [esp, prof + 0.0002, pAncho];
-            gPos = [
-              -(pLargo / 2) + dist + (esp / 2), 
-              (pEspesor / 2) - (prof / 2) + 0.0001, 
-              0
-            ];
-          }
-          
-          return (
-            <mesh position={gPos}>
-              <boxGeometry args={gSize} />
-              <meshStandardMaterial color="#1a1a1a" roughness={0.9} metalness={0.05} />
-            </mesh>
-          );
-        })()}
+
       </group>
     </group>
   );
@@ -1973,6 +2405,8 @@ interface GroupTransformControlsProps {
   groups?: Group3D[];
   transformMode?: 'translate' | 'rotate' | 'scale' | 'texture';
   snapActive?: boolean;
+  floorSnapActive?: boolean;
+  pieceSnapActive?: boolean;
   pieceGroupsRef: React.MutableRefObject<Map<string, THREE.Group>>;
   onUpdateMultiplePiecesTransform?: (updates: { id: string; position: [number, number, number]; rotation: [number, number, number] }[]) => void;
   onUpdatePieceTransform: (id: string, position: [number, number, number], rotation: [number, number, number]) => void;
@@ -1984,6 +2418,8 @@ const GroupTransformControls: React.FC<GroupTransformControlsProps> = ({
   groups,
   transformMode = 'translate',
   snapActive = false,
+  floorSnapActive = true,
+  pieceSnapActive = true,
   pieceGroupsRef,
   onUpdateMultiplePiecesTransform,
   onUpdatePieceTransform,
@@ -2189,13 +2625,50 @@ const GroupTransformControls: React.FC<GroupTransformControlsProps> = ({
       if (!isDraggingRef.current || !anchor) return;
 
       if (transformMode === 'translate') {
-        let dx = anchor.position.x - initialAnchorPos.current.x;
-        let dy = anchor.position.y - initialAnchorPos.current.y;
-        let dz = anchor.position.z - initialAnchorPos.current.z;
+        const controls = transformRef.current;
+        const currentAxis = controls?.axis || null;
+        let canMoveX = true;
+        let canMoveY = true;
+        let canMoveZ = true;
 
-        // Floor magnet snap for group base
+        if (currentAxis) {
+          const normAxis = currentAxis.toUpperCase();
+          if (normAxis === 'X') {
+            canMoveX = true; canMoveY = false; canMoveZ = false;
+          } else if (normAxis === 'Y') {
+            canMoveX = false; canMoveY = true; canMoveZ = false;
+          } else if (normAxis === 'Z') {
+            canMoveX = false; canMoveY = false; canMoveZ = true;
+          } else if (normAxis === 'XZ') {
+            canMoveX = true; canMoveY = false; canMoveZ = true;
+          }
+        } else {
+          const rawDx = Math.abs(anchor.position.x - initialAnchorPos.current.x);
+          const rawDy = Math.abs(anchor.position.y - initialAnchorPos.current.y);
+          const rawDz = Math.abs(anchor.position.z - initialAnchorPos.current.z);
+          if (rawDx > 0.0005 && rawDy < 0.00005 && rawDz < 0.00005) {
+            canMoveX = true; canMoveY = false; canMoveZ = false;
+          } else if (rawDy > 0.0005 && rawDx < 0.00005 && rawDz < 0.00005) {
+            canMoveX = false; canMoveY = true; canMoveZ = false;
+          } else if (rawDz > 0.0005 && rawDx < 0.00005 && rawDy < 0.00005) {
+            canMoveX = false; canMoveY = false; canMoveZ = true;
+          }
+        }
+
+        let dx = canMoveX ? anchor.position.x - initialAnchorPos.current.x : 0;
+        let dy = canMoveY ? anchor.position.y - initialAnchorPos.current.y : 0;
+        let dz = canMoveZ ? anchor.position.z - initialAnchorPos.current.z : 0;
+
+        anchor.position.x = initialAnchorPos.current.x + dx;
+        anchor.position.y = initialAnchorPos.current.y + dy;
+        anchor.position.z = initialAnchorPos.current.z + dz;
+
+        const effectiveFloorSnap = floorSnapActive !== undefined ? floorSnapActive : snapActive;
+        const effectivePieceSnap = pieceSnapActive !== undefined ? pieceSnapActive : snapActive;
+
+        // Floor magnet snap for group base (only if Y can move and floor snap is enabled)
         let isFloorSnapped = false;
-        if (snapActive) {
+        if (effectiveFloorSnap && canMoveY) {
           const currentMinY = initialMinYRef.current + dy;
           if (currentMinY < 0.03 || currentMinY < 0) {
             dy = -initialMinYRef.current;
@@ -2209,7 +2682,7 @@ const GroupTransformControls: React.FC<GroupTransformControlsProps> = ({
           p => !selectedPieces.some(sp => sp.id === p.id) && !p.hidden
         );
 
-        if (snapActive && nonSelectedPieces.length > 0) {
+        if (effectivePieceSnap && nonSelectedPieces.length > 0) {
           const snapThreshold = 0.025; // 25mm magnet snap
           const currentCenter = new THREE.Vector3(
             initialBoxCenter.current.x + dx,
@@ -2217,6 +2690,7 @@ const GroupTransformControls: React.FC<GroupTransformControlsProps> = ({
             initialBoxCenter.current.z + dz
           );
           const halfX = size.x / 2;
+          const halfY = size.y / 2;
           const halfZ = size.z / 2;
 
           for (const other of nonSelectedPieces) {
@@ -2226,35 +2700,63 @@ const GroupTransformControls: React.FC<GroupTransformControlsProps> = ({
               other.position3D[2] * 0.001
             );
             const oHalf = getGlobalHalfSizes(other.rotation3D, other.largo, other.espesor, other.ancho);
-            const dist = currentCenter.distanceTo(oCenter);
-            if (dist < 0.35) {
-              // Candidates X (flush left, right, contact)
-              const candX = [
-                oCenter.x - oHalf.x - halfX,
-                oCenter.x + oHalf.x + halfX,
-                oCenter.x - oHalf.x + halfX,
-                oCenter.x + oHalf.x - halfX
-              ];
-              for (const cX of candX) {
-                if (Math.abs(currentCenter.x - cX) < snapThreshold) {
-                  dx = cX - initialBoxCenter.current.x;
-                  anchor.position.x = initialAnchorPos.current.x + dx;
-                  break;
+            
+            // Accurate AABB gap distance calculation between group and other piece!
+            const gapX = Math.max(0, Math.abs(currentCenter.x - oCenter.x) - (halfX + oHalf.x));
+            const gapY = Math.max(0, Math.abs(currentCenter.y - oCenter.y) - (halfY + oHalf.y));
+            const gapZ = Math.max(0, Math.abs(currentCenter.z - oCenter.z) - (halfZ + oHalf.z));
+            const gapDist = Math.hypot(gapX, gapY, gapZ);
+
+            if (gapDist < 0.25) {
+              if (canMoveX) {
+                // Candidates X (flush left, right, contact)
+                const candX = [
+                  oCenter.x - oHalf.x - halfX,
+                  oCenter.x + oHalf.x + halfX,
+                  oCenter.x - oHalf.x + halfX,
+                  oCenter.x + oHalf.x - halfX
+                ];
+                for (const cX of candX) {
+                  if (Math.abs(currentCenter.x - cX) < snapThreshold) {
+                    dx = cX - initialBoxCenter.current.x;
+                    anchor.position.x = initialAnchorPos.current.x + dx;
+                    break;
+                  }
                 }
               }
 
-              // Candidates Z (flush front, back, contact)
-              const candZ = [
-                oCenter.z - oHalf.z - halfZ,
-                oCenter.z + oHalf.z + halfZ,
-                oCenter.z - oHalf.z + halfZ,
-                oCenter.z + oHalf.z - halfZ
-              ];
-              for (const cZ of candZ) {
-                if (Math.abs(currentCenter.z - cZ) < snapThreshold) {
-                  dz = cZ - initialBoxCenter.current.z;
-                  anchor.position.z = initialAnchorPos.current.z + dz;
-                  break;
+              if (canMoveY) {
+                // Candidates Y (flush top/bottom, contact top/bottom)
+                const candY = [
+                  oCenter.y + oHalf.y + halfY,
+                  oCenter.y - oHalf.y - halfY,
+                  oCenter.y + oHalf.y - halfY,
+                  oCenter.y - oHalf.y + halfY
+                ];
+                for (const cY of candY) {
+                  if (Math.abs(currentCenter.y - cY) < snapThreshold) {
+                    dy = cY - initialBoxCenter.current.y;
+                    anchor.position.y = initialAnchorPos.current.y + dy;
+                    isFloorSnapped = false;
+                    break;
+                  }
+                }
+              }
+
+              if (canMoveZ) {
+                // Candidates Z (flush front, back, contact)
+                const candZ = [
+                  oCenter.z - oHalf.z - halfZ,
+                  oCenter.z + oHalf.z + halfZ,
+                  oCenter.z - oHalf.z + halfZ,
+                  oCenter.z + oHalf.z - halfZ
+                ];
+                for (const cZ of candZ) {
+                  if (Math.abs(currentCenter.z - cZ) < snapThreshold) {
+                    dz = cZ - initialBoxCenter.current.z;
+                    anchor.position.z = initialAnchorPos.current.z + dz;
+                    break;
+                  }
                 }
               }
             }
@@ -2561,6 +3063,152 @@ function GroundSnapVisualizer() {
   );
 }
 
+function CameraNavigationController({
+  controlsRef,
+  selectedPiece,
+  pieces = []
+}: {
+  controlsRef: React.RefObject<any>;
+  selectedPiece?: Piece;
+  pieces?: Piece[];
+}) {
+  const { camera, invalidate } = useThree();
+
+  const animRef = useRef<{
+    active: boolean;
+    startCamPos: THREE.Vector3;
+    targetCamPos: THREE.Vector3;
+    startLookAt: THREE.Vector3;
+    targetLookAt: THREE.Vector3;
+    startTime: number;
+    duration: number;
+  }>({
+    active: false,
+    startCamPos: new THREE.Vector3(),
+    targetCamPos: new THREE.Vector3(),
+    startLookAt: new THREE.Vector3(),
+    targetLookAt: new THREE.Vector3(),
+    startTime: 0,
+    duration: 350
+  });
+
+  const triggerAnimation = useCallback((targetLookAt: THREE.Vector3, targetDist: number) => {
+    if (!controlsRef.current) return;
+    const startCamPos = camera.position.clone();
+    const startLookAt = controlsRef.current.target ? controlsRef.current.target.clone() : new THREE.Vector3();
+
+    // Direction from target to camera
+    let dir = camera.position.clone().sub(startLookAt).normalize();
+    if (dir.lengthSq() < 0.0001 || !isFinite(dir.x)) {
+      dir = new THREE.Vector3(1, 0.8, 1).normalize();
+    }
+
+    const targetCamPos = targetLookAt.clone().add(dir.multiplyScalar(targetDist));
+
+    animRef.current = {
+      active: true,
+      startCamPos,
+      targetCamPos,
+      startLookAt,
+      targetLookAt: targetLookAt.clone(),
+      startTime: performance.now(),
+      duration: 350
+    };
+    invalidate();
+  }, [camera, controlsRef, invalidate]);
+
+  useEffect(() => {
+    const handleFocusPoint = (e: any) => {
+      const pt = e.detail?.point;
+      if (pt) {
+        const vPoint = new THREE.Vector3(pt.x, pt.y, pt.z);
+        // Focus closely on the clicked point (7cm distance for fine details like grooves without clipping)
+        triggerAnimation(vPoint, 0.07);
+      }
+    };
+
+    const handleFocusPiece = (e?: any) => {
+      const targetP = e?.detail?.pieceId
+        ? pieces.find(p => p.id === e.detail.pieceId)
+        : selectedPiece;
+
+      if (targetP) {
+        const scale = 0.001;
+        const pPos = new THREE.Vector3(
+          targetP.position3D[0] * scale,
+          targetP.position3D[1] * scale,
+          targetP.position3D[2] * scale
+        );
+        const maxDim = Math.max(targetP.largo, targetP.ancho, targetP.espesor) * scale;
+        // Si la pieza tiene ranura, acercar a 8-12cm para apreciar el mecanizado al detalle
+        const targetDist = targetP.ranurado
+          ? Math.max(0.08, Math.min(0.20, maxDim * 0.28))
+          : Math.max(0.12, Math.min(0.38, maxDim * 0.45));
+        triggerAnimation(pPos, targetDist);
+      }
+    };
+
+    const handleResetCamera = () => {
+      if (!pieces || pieces.length === 0) {
+        triggerAnimation(new THREE.Vector3(0, 0, 0), 1.8);
+        return;
+      }
+      const scale = 0.001;
+      const box = new THREE.Box3();
+      pieces.forEach(p => {
+        const cx = p.position3D[0] * scale;
+        const cy = p.position3D[1] * scale;
+        const cz = p.position3D[2] * scale;
+        const hx = (p.largo * scale) / 2;
+        const hy = (p.espesor * scale) / 2;
+        const hz = (p.ancho * scale) / 2;
+        box.expandByPoint(new THREE.Vector3(cx - hx, cy - hy, cz - hz));
+        box.expandByPoint(new THREE.Vector3(cx + hx, cy + hy, cz + hz));
+      });
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const targetDist = Math.max(0.7, maxDim * 1.6);
+      triggerAnimation(center, targetDist);
+    };
+
+    window.addEventListener('focus-3d-point', handleFocusPoint);
+    window.addEventListener('focus-selected-piece', handleFocusPiece);
+    window.addEventListener('reset-camera', handleResetCamera);
+    window.addEventListener('focus-scene-all', handleResetCamera);
+
+    return () => {
+      window.removeEventListener('focus-3d-point', handleFocusPoint);
+      window.removeEventListener('focus-selected-piece', handleFocusPiece);
+      window.removeEventListener('reset-camera', handleResetCamera);
+      window.removeEventListener('focus-scene-all', handleResetCamera);
+    };
+  }, [selectedPiece, pieces, triggerAnimation]);
+
+  useFrame(() => {
+    if (!animRef.current.active || !controlsRef.current) return;
+    const now = performance.now();
+    const elapsed = now - animRef.current.startTime;
+    const progress = Math.min(1, elapsed / animRef.current.duration);
+    const ease = 1 - Math.pow(1 - progress, 3); // Ease-out cubic
+
+    camera.position.lerpVectors(animRef.current.startCamPos, animRef.current.targetCamPos, ease);
+    if (controlsRef.current.target) {
+      controlsRef.current.target.lerpVectors(animRef.current.startLookAt, animRef.current.targetLookAt, ease);
+      controlsRef.current.update();
+    }
+    invalidate();
+
+    if (progress >= 1) {
+      animRef.current.active = false;
+    }
+  });
+
+  return null;
+}
+
 export default function ThreeViewer({
   pieces,
   selectedPieceIds,
@@ -2585,17 +3233,98 @@ export default function ThreeViewer({
   onCommitFredoStretch,
   dimensionSide = 'pos',
   anchorMode = 'single',
-  snapActive,
+  snapActive = true,
+  floorSnapActive = true,
+  pieceSnapActive = true,
   onUnusedScale,
   edgeThicknessConfig,
   activeTextureFace = 'all',
   onSelectTextureFace,
   isTextureModalOpen,
-  onLongPressPiece,
   onCanvasPointerDown,
-  editingGroupId
+  editingGroupId,
+  isBoxSelectActive = false,
+  onToggleBoxSelect,
+  isBoxSelectAdditive = false,
+  onSelectPieceIds,
+  onSelectAllPieces,
+  onClearSelection
 }: ThreeViewerProps) {
   const pieceGroupsRef = useRef<Map<string, THREE.Group>>(new Map());
+  const projectorRef = useRef<((rect: { minX: number; minY: number; maxX: number; maxY: number }) => string[]) | null>(null);
+  const [boxDrag, setBoxDrag] = useState<{ startX: number; startY: number; currentX: number; currentY: number; isDragging: boolean } | null>(null);
+  const [liveEnclosedCount, setLiveEnclosedCount] = useState(0);
+
+  const handleBoxPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isBoxSelectActive) return;
+    e.stopPropagation();
+    try {
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {}
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setBoxDrag({ startX: x, startY: y, currentX: x, currentY: y, isDragging: true });
+    setLiveEnclosedCount(0);
+  };
+
+  const handleBoxPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!boxDrag?.isDragging || !isBoxSelectActive) return;
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const currentX = e.clientX - rect.left;
+    const currentY = e.clientY - rect.top;
+    setBoxDrag(prev => prev ? { ...prev, currentX, currentY } : null);
+
+    if (projectorRef.current) {
+      const minX = Math.min(boxDrag.startX, currentX);
+      const maxX = Math.max(boxDrag.startX, currentX);
+      const minY = Math.min(boxDrag.startY, currentY);
+      const maxY = Math.max(boxDrag.startY, currentY);
+      if ((maxX - minX) >= 5 || (maxY - minY) >= 5) {
+        const liveIds = projectorRef.current({ minX, minY, maxX, maxY });
+        setLiveEnclosedCount(liveIds.length);
+      }
+    }
+  };
+
+  const handleBoxPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!boxDrag?.isDragging || !isBoxSelectActive) return;
+    e.stopPropagation();
+    try {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {}
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const endX = e.clientX - rect.left;
+    const endY = e.clientY - rect.top;
+    const minX = Math.min(boxDrag.startX, endX);
+    const maxX = Math.max(boxDrag.startX, endX);
+    const minY = Math.min(boxDrag.startY, endY);
+    const maxY = Math.max(boxDrag.startY, endY);
+
+    if ((maxX - minX) >= 6 || (maxY - minY) >= 6) {
+      if (projectorRef.current) {
+        const enclosedIds = projectorRef.current({ minX, minY, maxX, maxY });
+        if (navigator.vibrate) {
+          try { navigator.vibrate(20); } catch {}
+        }
+        if (e.shiftKey || isBoxSelectAdditive) {
+          const merged = Array.from(new Set([...selectedPieceIds, ...enclosedIds]));
+          onSelectPieceIds?.(merged);
+        } else {
+          onSelectPieceIds?.(enclosedIds);
+        }
+      }
+    }
+    setBoxDrag(null);
+    setLiveEnclosedCount(0);
+  };
+
+  const handleBoxPointerCancel = () => {
+    setBoxDrag(null);
+    setLiveEnclosedCount(0);
+  };
 
   const registerPieceGroup = useCallback((pieceId: string, grp: THREE.Group | null) => {
     if (grp) {
@@ -2631,6 +3360,7 @@ export default function ThreeViewer({
   }, [pieces, transformMode, fredoPreviewDelta, selectedPieces, fredoAxis, fredoPlaneRatio, fredoMode]);
 
   const isGroupTransformActive = !editingGroupId && (selectedPieces.length > 1 || (selectedPieces.length === 1 && !!selectedPieces[0].groupId));
+  const orbitControlsRef = useRef<any>(null);
 
   return (
     <div 
@@ -2639,7 +3369,7 @@ export default function ThreeViewer({
     >
       <CanvasErrorBoundary fallbackTitle="Visor 3D (Optimización Móvil)">
         <Canvas 
-          camera={{ position: [2, 2, 2], fov: 50 }}
+          camera={{ position: [2, 2, 2], fov: 45, near: 0.001, far: 200 }}
           dpr={[1, Math.min(typeof window !== 'undefined' ? window.devicePixelRatio : 1, 1.5)]}
           gl={{
             antialias: true,
@@ -2707,6 +3437,8 @@ export default function ThreeViewer({
               groups={groups}
               transformMode={transformMode}
               snapActive={snapActive}
+              floorSnapActive={floorSnapActive}
+              pieceSnapActive={pieceSnapActive}
               pieceGroupsRef={pieceGroupsRef}
               onUpdateMultiplePiecesTransform={onUpdateMultiplePiecesTransform}
               onUpdatePieceTransform={onUpdatePieceTransform}
@@ -2746,18 +3478,226 @@ export default function ThreeViewer({
                 dimensionSide={dimensionSide}
                 anchorMode={anchorMode}
                 snapActive={snapActive}
+                floorSnapActive={floorSnapActive}
+                pieceSnapActive={pieceSnapActive}
                 edgeThicknessConfig={edgeThicknessConfig}
                 activeTextureFace={activeTextureFace}
                 onSelectTextureFace={onSelectTextureFace}
                 isTextureModalOpen={isTextureModalOpen}
-                onLongPressPiece={onLongPressPiece}
               />
             ));
           })}
 
-          <OrbitControls makeDefault />
+          <SelectionProjector
+            pieces={pieces}
+            editingGroupId={editingGroupId}
+            pieceGroupsRef={pieceGroupsRef}
+            onRegisterProjector={(fn) => { projectorRef.current = fn; }}
+          />
+
+          <CameraNavigationController
+            controlsRef={orbitControlsRef}
+            selectedPiece={pieces.find(p => selectedPieceIds.includes(p.id))}
+            pieces={pieces}
+          />
+
+          <OrbitControls 
+            ref={orbitControlsRef}
+            makeDefault 
+            enabled={!isBoxSelectActive && !boxDrag?.isDragging}
+            enableDamping={true}
+            dampingFactor={0.08}
+            screenSpacePanning={true}
+            minDistance={0.001}
+            maxDistance={80}
+            zoomSpeed={0.85}
+            rotateSpeed={0.65}
+            panSpeed={0.45}
+          />
         </Canvas>
       </CanvasErrorBoundary>
+
+      {/* Box Selection Transparent Overlay (Active only when isBoxSelectActive) */}
+      {isBoxSelectActive && (
+        <div
+          className="absolute inset-0 z-20 cursor-crosshair touch-none select-none"
+          onPointerDown={handleBoxPointerDown}
+          onPointerMove={handleBoxPointerMove}
+          onPointerUp={handleBoxPointerUp}
+          onPointerCancel={handleBoxPointerCancel}
+        >
+          {/* Top Banner indicating Box Select Mode - Situada más abajo para no tapar las pestañas superiores */}
+          <div className="absolute top-14 sm:top-16 left-1/2 -translate-x-1/2 z-30 pointer-events-auto bg-[#181818]/95 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-[#f0a144] shadow-2xl flex items-center gap-2 text-white animate-in fade-in slide-in-from-top-2 duration-150 max-w-[95vw]">
+            <MousePointerSquareDashed className="w-3.5 h-3.5 text-[#f0a144] animate-pulse shrink-0" />
+            <span className="text-[8px] sm:text-[9.5px] font-bold text-gray-200 truncate">
+              {liveEnclosedCount > 0 ? `${liveEnclosedCount} ${liveEnclosedCount === 1 ? 'pieza en recuadro' : 'piezas en recuadro'}` : 'Desliza en pantalla para encerrar piezas'}
+            </span>
+            <div className="flex items-center gap-1 shrink-0">
+              {onSelectAllPieces && (
+                <button
+                  type="button"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    if (navigator.vibrate) {
+                      try { navigator.vibrate(20); } catch {}
+                    }
+                    onSelectAllPieces();
+                  }}
+                  className="text-[7.5px] font-black uppercase bg-[#2a2a2a] hover:bg-[#333] text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded cursor-pointer transition-all active:scale-95 shrink-0"
+                  title="Seleccionar todas las piezas"
+                >
+                  Todo
+                </button>
+              )}
+              {selectedPieceIds.length > 0 && onClearSelection && (
+                <button
+                  type="button"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    if (navigator.vibrate) {
+                      try { navigator.vibrate(15); } catch {}
+                    }
+                    onClearSelection();
+                  }}
+                  className="text-[7.5px] font-black uppercase bg-[#2a2a2a] hover:bg-[#333] text-red-400 border border-red-500/30 px-2 py-0.5 rounded cursor-pointer transition-all active:scale-95 shrink-0"
+                  title="Deseleccionar todo"
+                >
+                  Limpiar
+                </button>
+              )}
+              {onToggleBoxSelect && (
+                <button
+                  type="button"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    if (navigator.vibrate) {
+                      try { navigator.vibrate(15); } catch {}
+                    }
+                    onToggleBoxSelect();
+                  }}
+                  className="text-[7.5px] font-black uppercase bg-[#f0a144] hover:bg-[#ffba66] text-black px-2 py-0.5 rounded cursor-pointer transition-all active:scale-95 shrink-0"
+                >
+                  Listo ✓
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Marquee Selection Rectangle (Animated CAD box with live counter) */}
+          {boxDrag && boxDrag.isDragging && (
+            <div
+              className="absolute pointer-events-none border-2 border-dashed border-[#f0a144] bg-[#f0a144]/15 rounded-xs transition-none shadow-[0_0_15px_rgba(240,161,68,0.25)]"
+              style={{
+                left: Math.min(boxDrag.startX, boxDrag.currentX),
+                top: Math.min(boxDrag.startY, boxDrag.currentY),
+                width: Math.abs(boxDrag.currentX - boxDrag.startX),
+                height: Math.abs(boxDrag.currentY - boxDrag.startY),
+              }}
+            >
+              <div className="absolute top-1 left-1 bg-black/90 backdrop-blur-md px-1.5 py-0.5 rounded text-[8px] font-mono font-black text-[#f0a144] border border-[#f0a144]/40 flex items-center gap-1 shadow-lg select-none whitespace-nowrap">
+                <MousePointerSquareDashed className="w-2.5 h-2.5" />
+                <span>{liveEnclosedCount} {liveEnclosedCount === 1 ? 'pieza' : 'piezas'}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
+}
+
+function SelectionProjector({
+  pieces,
+  editingGroupId,
+  pieceGroupsRef,
+  onRegisterProjector
+}: {
+  pieces: Piece[];
+  editingGroupId?: string | null;
+  pieceGroupsRef: React.MutableRefObject<Map<string, THREE.Group>>;
+  onRegisterProjector: (fn: (rect: { minX: number; minY: number; maxX: number; maxY: number }) => string[]) => void;
+}) {
+  const { camera, size } = useThree();
+
+  useEffect(() => {
+    const projectBox = (rect: { minX: number; minY: number; maxX: number; maxY: number }): string[] => {
+      const selected = new Set<string>();
+
+      pieces.forEach(piece => {
+        if (piece.hidden) return;
+        const grp = pieceGroupsRef.current.get(piece.id);
+
+        let screenMinX = Infinity;
+        let screenMaxX = -Infinity;
+        let screenMinY = Infinity;
+        let screenMaxY = -Infinity;
+        let hasPointsInFront = false;
+
+        if (grp) {
+          const box3 = new THREE.Box3().setFromObject(grp);
+          if (!box3.isEmpty()) {
+            const corners = [
+              new THREE.Vector3(box3.min.x, box3.min.y, box3.min.z),
+              new THREE.Vector3(box3.max.x, box3.min.y, box3.min.z),
+              new THREE.Vector3(box3.min.x, box3.max.y, box3.min.z),
+              new THREE.Vector3(box3.max.x, box3.max.y, box3.min.z),
+              new THREE.Vector3(box3.min.x, box3.min.y, box3.max.z),
+              new THREE.Vector3(box3.max.x, box3.min.y, box3.max.z),
+              new THREE.Vector3(box3.min.x, box3.max.y, box3.max.z),
+              new THREE.Vector3(box3.max.x, box3.max.y, box3.max.z),
+            ];
+
+            for (const c of corners) {
+              const p = c.clone().project(camera);
+              if (p.z >= -1 && p.z <= 1) {
+                hasPointsInFront = true;
+              }
+              const sx = ((p.x + 1) / 2) * size.width;
+              const sy = ((-p.y + 1) / 2) * size.height;
+              screenMinX = Math.min(screenMinX, sx);
+              screenMaxX = Math.max(screenMaxX, sx);
+              screenMinY = Math.min(screenMinY, sy);
+              screenMaxY = Math.max(screenMaxY, sy);
+            }
+          }
+        }
+
+        if (!hasPointsInFront || screenMinX === Infinity) {
+          const v = new THREE.Vector3(piece.position3D[0] / 1000, piece.position3D[1] / 1000, piece.position3D[2] / 1000).project(camera);
+          if (v.z >= -1 && v.z <= 1) {
+            hasPointsInFront = true;
+            const sx = ((v.x + 1) / 2) * size.width;
+            const sy = ((-v.y + 1) / 2) * size.height;
+            screenMinX = sx - 15;
+            screenMaxX = sx + 15;
+            screenMinY = sy - 15;
+            screenMaxY = sy + 15;
+          }
+        }
+
+        if (hasPointsInFront) {
+          const overlaps = (
+            screenMinX <= rect.maxX && screenMaxX >= rect.minX &&
+            screenMinY <= rect.maxY && screenMaxY >= rect.minY
+          );
+          if (overlaps) {
+            selected.add(piece.id);
+          }
+        }
+      });
+
+      const finalSelected = new Set(selected);
+      pieces.forEach(p => {
+        if (p.groupId && selected.has(p.id) && (!editingGroupId || editingGroupId !== p.groupId)) {
+          pieces.filter(sibling => sibling.groupId === p.groupId).forEach(sibling => finalSelected.add(sibling.id));
+        }
+      });
+
+      return Array.from(finalSelected);
+    };
+
+    onRegisterProjector(projectBox);
+  }, [camera, size, pieces, editingGroupId, pieceGroupsRef, onRegisterProjector]);
+
+  return null;
 }
